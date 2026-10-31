@@ -113,4 +113,4 @@ git tag v1.9.0
 git push origin v1.9.0
 ```
 
-Versionen tas från taggen, så `package.json` behöver inte ändras. Bygget går också att starta för hand under fliken Actions (Release, Run workflow).
+Versionen tas från taggen, så `package.json` behöver inte ändras. Det går också utan att pusha någon tagg: under fliken **Actions** väljer du **Release**, klickar på **Run workflow** och skriver versionen, t.ex. `v1.9.0`. Då skapas taggen och releasen från den gren du valt.

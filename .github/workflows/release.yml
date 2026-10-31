@@ -1,5 +1,6 @@
 # Bygger Windows-installationen och publicerar den som en release.
 # Körs när en versionstagg pushas (t.ex. v1.9.0), eller manuellt från fliken Actions.
+# Vid manuell körning skapas taggen av releasen, på den gren som valts.
 name: Release
 
 on:
@@ -9,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Versionstagg att bygga, t.ex. v1.9.0"
+        description: "Versionstagg att skapa, t.ex. v1.9.0"
         required: true
 
 permissions:
@@ -24,8 +25,6 @@ jobs:
     steps:
       - name: Hämta koden
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Installera Node.js
         uses: actions/setup-node@v4
@@ -54,6 +53,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: DWG-visare ${{ steps.version.outputs.version }}
           body_path: .github/release-notes.md
           files: dist/DWG-visare-Setup-${{ steps.version.outputs.version }}.exe
