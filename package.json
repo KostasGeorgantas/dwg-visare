@@ -47,7 +47,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "DWG-visare"
+      "shortcutName": "DWG-visare",
+      "artifactName": "DWG-visare-Setup-${version}.${ext}"
     },
     "publish": null
   }

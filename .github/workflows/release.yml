@@ -1,0 +1,60 @@
+# Bygger Windows-installationen och publicerar den som en release.
+# Körs när en versionstagg pushas (t.ex. v1.9.0), eller manuellt från fliken Actions.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Versionstagg att bygga, t.ex. v1.9.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Hämta koden
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Installera Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Läs versionen från taggen
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Installera beroenden
+        run: npm ci
+
+      # Versionen i package.json sätts från taggen, så den behöver inte ändras för hand
+      - name: Sätt version
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Bygg installationsfilen
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Publicera release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: DWG-visare ${{ steps.version.outputs.version }}
+          body_path: .github/release-notes.md
+          files: dist/DWG-visare-Setup-${{ steps.version.outputs.version }}.exe
+          fail_on_unmatched_files: true

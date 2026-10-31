@@ -4,7 +4,7 @@ En enkel Windows-app för att titta på AutoCAD-ritningar (.dwg): öppna, zooma,
 
 ## Installera
 
-Kör `DWG-visare Setup 1.8.0.exe`. En äldre version ersätts automatiskt. Installationen kräver inga administratörsrättigheter och lägger appen i Start-menyn och på skrivbordet. .dwg-filer kopplas till appen, så du kan dubbelklicka på en ritning i Utforskaren.
+Ladda ner `DWG-visare-Setup-<version>.exe` från [Releases](https://github.com/KostasGeorgantas/dwg-visare/releases) och kör den. En äldre version ersätts automatiskt. Installationen kräver inga administratörsrättigheter och lägger appen i Start-menyn och på skrivbordet. .dwg-filer kopplas till appen, så du kan dubbelklicka på en ritning i Utforskaren.
 
 Installationsfilen är inte kodsignerad. Windows SmartScreen kan därför visa "Windows skyddade datorn". Klicka på **Mer information** och sedan **Kör ändå**.
 
@@ -100,3 +100,17 @@ npm run dist
 ```
 
 `npm run dist` bygger Windows-installationen i `dist/`. På Linux eller macOS krävs Wine.
+
+## Ny version
+
+Skapa och pusha en versionstagg, så bygger GitHub Actions installationsfilen på Windows och publicerar den som en release:
+
+```bash
+git tag v1.9.0
+```
+
+```bash
+git push origin v1.9.0
+```
+
+Versionen tas från taggen, så `package.json` behöver inte ändras. Bygget går också att starta för hand under fliken Actions (Release, Run workflow).
