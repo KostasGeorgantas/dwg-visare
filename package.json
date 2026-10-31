@@ -1,0 +1,54 @@
+{
+  "name": "dwg-visare",
+  "productName": "DWG-visare",
+  "version": "1.8.0",
+  "description": "Enkel visare för DWG-ritningar: öppna, zooma, panorera och skriv ut.",
+  "author": "Kogeteknik",
+  "license": "GPL-3.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "se.kogeteknik.dwgvisare",
+    "productName": "DWG-visare",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*"
+    ],
+    "asarUnpack": [
+      "src/vendor/wasm/*.wasm"
+    ],
+    "fileAssociations": [
+      {
+        "ext": "dwg",
+        "name": "AutoCAD-ritning",
+        "description": "AutoCAD-ritning",
+        "role": "Viewer"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DWG-visare"
+    },
+    "publish": null
+  }
+}

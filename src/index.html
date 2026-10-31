@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <title>DWG-visare</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="toolbar" role="toolbar" aria-label="Verktyg">
+    <button id="btn-open" class="btn primary" title="Öppna ritning (Ctrl+O)">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5.5v10h15v-8h-7l-2-2z"/></svg>
+      <span>Öppna</span>
+    </button>
+    <span class="sep"></span>
+    <button id="btn-zoom-in" class="btn icon" title="Zooma in (Ctrl +)" aria-label="Zooma in" disabled>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M12.5 12.5l5 5M6 8.5h5M8.5 6v5"/></svg>
+    </button>
+    <button id="btn-zoom-out" class="btn icon" title="Zooma ut (Ctrl −)" aria-label="Zooma ut" disabled>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M12.5 12.5l5 5M6 8.5h5"/></svg>
+    </button>
+    <button id="btn-fit" class="btn" title="Visa hela ritningen (Ctrl+0)" disabled>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 7V2.5H7M13 2.5h4.5V7M17.5 13v4.5H13M7 17.5H2.5V13"/></svg>
+      <span>Hela ritningen</span>
+    </button>
+    <span class="sep"></span>
+    <button id="btn-guides" class="btn toggle" title="Visa/dölj stödlinjer: rutnät, axlar och hårkors (Ctrl+G)" aria-pressed="false" disabled>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 6.5h15M2.5 13.5h15M6.5 2.5v15M13.5 2.5v15"/></svg>
+      <span>Stödlinjer</span>
+    </button>
+    <button id="btn-lw" class="btn toggle" title="Visa/dölj linjetjocklekar på skärmen (Ctrl+L). Utskriften får alltid linjetjocklekar." aria-pressed="true" disabled>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14" stroke-width="1"/><path d="M3 10h14" stroke-width="2.2"/><path d="M3 15.5h14" stroke-width="3.6"/></svg>
+      <span>Linjetjocklek</span>
+    </button>
+    <button id="btn-bg" class="btn icon" title="Byt bakgrund mörk/ljus (Ctrl+B)" aria-label="Byt bakgrund">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 3a7 7 0 0 1 0 14z" class="fill"/></svg>
+    </button>
+    <span class="grow"></span>
+    <div class="seg" role="radiogroup" aria-label="Utskrift" title="Välj om utskriften ska vara i färg eller svartvit">
+      <span class="seg-label">Utskrift</span>
+      <label><input type="radio" name="print-color" id="print-color" value="color"><span>Färg</span></label>
+      <label><input type="radio" name="print-color" id="print-mono" value="mono" checked><span>Svartvit</span></label>
+    </div>
+    <button id="btn-print" class="btn" title="Skriv ut det som syns i fönstret (Ctrl+P)" disabled>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 7.5v-5h9v5M5.5 14.5h-3v-7h15v7h-3M5.5 11.5h9v6h-9z"/></svg>
+      <span>Skriv ut</span>
+    </button>
+  </header>
+
+  <nav id="tabs" class="tabs" role="tablist" aria-label="Öppna ritningar" hidden></nav>
+
+  <main id="viewport" class="viewport" tabindex="0" aria-label="Ritningsyta">
+    <div id="sheets" class="sheets"></div>
+    <canvas id="guides" class="guides" aria-hidden="true"></canvas>
+
+    <section id="empty" class="empty">
+      <div class="empty-card">
+        <svg class="empty-art" viewBox="0 0 120 84" aria-hidden="true">
+          <rect x="1" y="1" width="118" height="82"/>
+          <rect x="86" y="62" width="32" height="20"/>
+          <path d="M14 66V18h44v22h22v26z"/>
+          <circle cx="36" cy="40" r="9"/>
+          <path d="M14 74h66M14 72v4M80 72v4" class="dim"/>
+        </svg>
+        <h1>Öppna en ritning</h1>
+        <p>Välj en eller flera <b>.dwg</b>-filer eller dra in dem hit. Varje ritning öppnas i en egen flik.</p>
+        <button id="btn-open-2" class="btn primary">Öppna fil…</button>
+        <p id="engine" class="muted">Startar DWG-läsaren…</p>
+      </div>
+    </section>
+
+    <div id="busy" class="busy" hidden>
+      <div class="spinner"></div>
+      <span id="busy-text">Läser ritningen…</span>
+    </div>
+
+    <div id="drop" class="drop" hidden><span>Släpp filen för att öppna den</span></div>
+
+    <div id="error" class="error" role="alert" hidden>
+      <b id="error-title">Kunde inte öppna filen</b>
+      <span id="error-text"></span>
+      <button id="error-close" class="btn">Stäng</button>
+    </div>
+  </main>
+
+  <footer class="status">
+    <span id="st-file" class="st-file">Ingen ritning öppen</span>
+    <span class="grow"></span>
+    <span id="st-version"></span>
+    <span id="st-xref" class="st-warn" hidden></span>
+    <span id="st-fonts"></span>
+    <span id="st-grid"></span>
+    <span class="st-coord">X <b id="st-x">–</b></span>
+    <span class="st-coord">Y <b id="st-y">–</b></span>
+    <span class="st-zoom"><b id="st-zoom">–</b></span>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
