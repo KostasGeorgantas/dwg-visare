@@ -74,12 +74,22 @@ Statusraden visar t.ex. "Xref 3". Om någon fil saknas står det i rött, t.ex. 
 
 Objekt på lager som är släckta eller frysta visas inte, precis som i AutoCAD. Färger följer AutoCAD: sann färg (RGB) på objekt och lager, färgindex 1–255, ByLayer och ByBlock. Färg 7 är vit på mörk bakgrund och svart på ljus.
 
+## Visas allt?
+
+Statusraden visar om allt i ritningen kom med, t.ex. **Alla 312 objekt visas**. Om något inte går att visa står det i rött, t.ex. **2 av 153 objekt visas inte**. Håll muspekaren över texten för att se vilka objekttyper det gäller och varför, och hur många objekt av varje typ som ritades.
+
+Räkningen gäller modellrymden, block som används och inlästa xrefs. Objekt på släckta och frysta lager räknas inte, eftersom de inte ska synas. Finns det objekt i layouterna (pappersrymden) står det också där.
+
+Det här ritas: linjer, bågar, cirklar, ellipser, polylinjer (även gamla POLYLINE och 3D-polylinjer), splines, XLINE och RAY, text och flerradig text, mått, hänvisningslinjer (LEADER och MULTILEADER), toleranser, tabeller, block och blockattribut, attributdefinitioner, skraffyr och fyllningar, SOLID, WIPEOUT, multilinjer (MLINE), 3D-ytor (3DFACE) och punkter.
+
 ## Begränsningar
 
 - Bara modellrymden visas, inte layouter/pappersrymd.
 - Blockattribut (t.ex. värdena i en ritningsstämpel) visas, utom de som är markerade som osynliga. Flerradiga attribut visas på en rad.
 - Linjetyper med text eller symboler (t.ex. ---GAS---) visas bara som streck, utan texten.
-- Vissa objekt ritas inte, t.ex. tabeller, inbäddade bilder, WIPEOUT, MLINE och multiledare. De hoppas över så att resten av ritningen visas.
+- 3D-solider och andra 3D-kroppar, inbäddade bilder, OLE-objekt och underlägg (PDF/DWF/DGN) ritas inte. Statusraden talar om när en ritning innehåller sådant.
+- Tabeller i DWG 2013 och senare: tabellens placering går inte att läsa, så tabellen visas inte (statusraden talar om det).
+- Multilinjer (MLINE) ritas med heldragna linjer och utan fyllning.
 - Toningar som är runda eller böjda (t.ex. SPHERICAL, CURVED) visas som linjära.
 - Om ritningen har ett enstaka objekt långt bort från resten blir "Hela ritningen" väldigt utzoomad, precis som i AutoCAD.
 

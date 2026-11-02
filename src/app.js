@@ -234,14 +234,17 @@ async function readDrawing(name, data, filePath) {
     if (!ptr) throw new Error(`${name} kunde inte tolkas. Filen kan vara skadad eller sparad i ett format som inte stöds.`);
     const version = lib.dwg_get_version_type(ptr);
     const db = lib.convert(ptr);
+    fixNarrowStrings(db, version);
     const xrefs = await attachXrefs(lib, db, filePath, 0, new Set([filePath.toLowerCase()]));
     const markup = lib.dwg_to_svg(db).replace(/^<\?xml[^>]*>\s*/, '');
+    const content = lib.lastSvgStats;
 
     const tab = createTab(name, bytes.byteLength, markup);
     if (!tab) throw new Error(`${name} verkar vara tom. Det finns inga objekt i modellrymden att visa.`);
     tab.version = describeVersion(version);
     tab.fonts = await applyFonts(tab.svg, db.tables?.STYLE?.entries || [], filePath);
     tab.xrefs = xrefs;
+    tab.content = content;
     tabs.push(tab);
     renderTabs();
     activate(tab);
@@ -289,6 +292,34 @@ function describeVersion(version) {
     tip: `Filen är sparad i DWG-formatet från AutoCAD ${format} (${version.hdr}).\n` +
       `Formatet används av ${saved}. Äldre AutoCAD-versioner kan inte öppna filen utan att den först sparas ner.`
   };
+}
+
+// I format före AutoCAD 2007 lagras text med 8 bitar per tecken, men DWG-biblioteket
+// läser texten i multiledare som 16-bitars Unicode, så två tecken blir ett ("xx" blir
+// U+7878, ett kinesiskt tecken). Dela upp tecknen i byte igen och läs dem som Windows-1252.
+const decoder1252 = new TextDecoder('windows-1252');
+function narrowText(text) {
+  const s = String(text || '');
+  if (!/[\u0100-\uffff]/.test(s)) return s;
+  const bytes = [];
+  for (const ch of s) {
+    const c = ch.charCodeAt(0);
+    bytes.push(c & 255);
+    if (c >> 8) bytes.push(c >> 8);
+  }
+  while (bytes.length && bytes[bytes.length - 1] === 0) bytes.pop();
+  return decoder1252.decode(new Uint8Array(bytes));
+}
+
+function fixNarrowStrings(db, version) {
+  // AC1021 = AutoCAD 2007, det första formatet med Unicode-text
+  const hdr = String(version?.hdr || '');
+  if (!/^AC10(0\d|1[0-8])$/.test(hdr)) return;
+  for (const block of db.tables?.BLOCK_RECORD?.entries || []) {
+    for (const e of block.entities || []) {
+      if (e.type === 'MULTILEADER' && e.textContent) e.textContent = narrowText(e.textContent);
+    }
+  }
 }
 
 function looksLikeDwg(buf) {
@@ -425,6 +456,7 @@ async function attachXrefs(lib, db, hostPath, depth, seen) {
       ptr = lib.dwg_read_data(bytes, Dwg_File_Type.DWG);
       if (!ptr) { result.status = 'unreadable'; continue; }
       xdb = lib.convert(ptr);
+      fixNarrowStrings(xdb, lib.dwg_get_version_type(ptr));
     } catch (err) {
       console.warn('Xref kunde inte läsas:', result.path, err);
       result.status = 'unreadable';
@@ -482,6 +514,52 @@ function mergeXref(host, rec, xdb) {
   rec.entities = (modelSpace?.entities || []).map(fix);
 }
 
+// ---------- Vad som visas ----------
+// Konverteraren räknar varje objekt i modellrymden och i de block som används:
+// ritat, inte stöd eller fel. Statusraden visar om allt kom med.
+
+const TYPE_NAMES = {
+  '3DSOLID': '3D-solider (kan inte ritas i 2D)', REGION: 'regioner', BODY: '3D-kroppar', SURFACE: 'ytor',
+  MESH: 'nät (mesh)', POLYFACE: 'polyface-nät', IMAGE: 'inbäddade bilder', OLE2FRAME: 'OLE-objekt',
+  ACAD_TABLE: 'tabeller (placeringen går inte att läsa i DWG 2013 och senare)', TABLE: 'tabeller (placeringen går inte att läsa i DWG 2013 och senare)', ARC_DIMENSION: 'bågmått', LARGE_RADIAL_DIMENSION: 'stora radiemått',
+  SHAPE: 'symboler (SHAPE)', TRACE: 'spår (TRACE)', ACAD_PROXY_ENTITY: 'proxyobjekt från andra program',
+  PROXY: 'proxyobjekt från andra program', UNDERLAY: 'underlägg (PDF/DWF/DGN)', PDFUNDERLAY: 'PDF-underlägg',
+  DWFUNDERLAY: 'DWF-underlägg', DGNUNDERLAY: 'DGN-underlägg', GEOPOSITIONMARKER: 'geopositioner', LIGHT: 'ljuskällor',
+  HELIX: 'spiraler', SECTIONOBJECT: 'snittobjekt', POINTCLOUD: 'punktmoln'
+};
+
+function showContentStatus(content) {
+  const el = $('st-content');
+  if (!content) { el.textContent = ''; el.title = ''; el.classList.remove('st-warn'); return; }
+  const rows = Object.entries(content.types || {});
+  const drawn = rows.reduce((n, [, c]) => n + c.drawn, 0);
+  const missing = rows.filter(([, c]) => c.skipped + c.failed > 0);
+  const missingCount = missing.reduce((n, [, c]) => n + c.skipped + c.failed, 0);
+  const total = drawn + missingCount;
+  const fmt = (n) => n.toLocaleString('sv-SE');
+  el.classList.toggle('st-warn', missingCount > 0);
+  el.textContent = missingCount
+    ? `${fmt(missingCount)} av ${fmt(total)} objekt visas inte`
+    : `Alla ${fmt(total)} objekt visas`;
+  const lines = [];
+  if (missingCount) {
+    lines.push('Visas inte:');
+    for (const [type, c] of missing.sort((a, b) => (b[1].skipped + b[1].failed) - (a[1].skipped + a[1].failed))) {
+      const why = TYPE_NAMES[type] ? ` – ${TYPE_NAMES[type]}` : '';
+      const err = c.failed ? ` (${c.failed} gick inte att läsa)` : '';
+      lines.push(`   ${type}: ${c.skipped + c.failed}${why}${err}`);
+    }
+    lines.push('');
+  }
+  lines.push('Ritade objekt per typ:');
+  for (const [type, c] of rows.filter(([, c]) => c.drawn).sort((a, b) => b[1].drawn - a[1].drawn)) lines.push(`   ${type}: ${fmt(c.drawn)}`);
+  lines.push('', 'Räknar objekt i modellrymden, i block som används och i inlästa xrefs. Objekt på släckta och frysta lager räknas inte.');
+  if (content.paperSpace) {
+    lines.push('', `Layouterna (pappersrymden) innehåller ${fmt(content.paperSpace)} objekt som inte visas, t.ex. ritningsramar som bara finns där.`);
+  }
+  el.title = lines.join('\n');
+}
+
 function showXrefStatus(xrefs) {
   const el = $('st-xref');
   if (!xrefs || !xrefs.length) { el.hidden = true; return; }
@@ -522,6 +600,7 @@ function activate(tab) {
   $('st-version').title = tab ? tab.version.tip : '';
   showFontStatus(tab ? tab.fonts : null);
   showXrefStatus(tab ? tab.xrefs : null);
+  showContentStatus(tab ? tab.content : null);
   if (!tab) { $('st-zoom').textContent = '–'; $('st-grid').textContent = ''; }
   api.setTitle(tab ? `${tab.name} – DWG-visare` : 'DWG-visare');
   renderTabs();

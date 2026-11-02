@@ -158,7 +158,9 @@ body {
 /* Linjer är alltid 1 px oavsett zoom, som i ett CAD-program */
 .sheet svg > g { stroke-width: 1px; }
 .sheet svg * { vector-effect: non-scaling-stroke; }
-.sheet text { stroke: none; font-family: Arial, "Segoe UI", sans-serif; white-space: pre; }
+/* Standardtypsnitt sätts på ritningen och ärvs, så att textstilens typsnitt (satt på texten eller dess grupp) vinner */
+.sheet svg { font-family: Arial, "Segoe UI", sans-serif; }
+.sheet text { stroke: none; white-space: pre; }
 
 /* ---------- Tomt läge ---------- */
 .empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; }

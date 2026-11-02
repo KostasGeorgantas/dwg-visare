@@ -5458,29 +5458,81 @@ class SvgConverter {
     });
     return { bbox, element: texts.join("\n") };
   }
-  mtext(entity) {
-    const fontsize = entity.textHeight;
-    const insertionPoint = entity.insertionPoint;
-    const lines = this.extractMTextLines(entity.text);
-    const attachmentPoint = entity.attachmentPoint;
-    let anchor = "start";
-    if (attachmentPoint == DwgAttachmentPoint.BottomCenter || attachmentPoint == DwgAttachmentPoint.MiddleCenter || attachmentPoint == DwgAttachmentPoint.TopCenter) {
-      anchor = "middle";
-    } else if (attachmentPoint == DwgAttachmentPoint.BottomRight || attachmentPoint == DwgAttachmentPoint.MiddleRight || attachmentPoint == DwgAttachmentPoint.TopRight) {
-      anchor = "end";
-    }
-    const result = this.lines(
-      lines,
-      fontsize,
-      insertionPoint,
-      entity.extentsWidth,
-      anchor
-    );
-    // DWG-visare: textstilen följer med så att appen kan välja typsnitt
-    result.element = `<g data-style="${styleAttr(entity.styleName)}">${result.element}</g>`;
-    return result;
+  // DWG-visare: flerradig text (MTEXT) med fäste (9 lägen), rotation, radavstånd,
+  // radbrytning efter textrutans bredd och AutoCAD:s formateringskoder.
+  mtextLines(raw) {
+    const text = String(raw || "")
+      .replace(/\\U\+([0-9A-Fa-f]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\\\\/g, "\u0001").replace(/\\\{/g, "\u0002").replace(/\\\}/g, "\u0003")
+      .replace(/\\S([^;^#/]*)[\^#/]([^;]*);/g, "$1/$2")
+      .replace(/\\[pP](?![a-zA-Z])/g, (m) => m === "\\P" ? "\n" : "")
+      .replace(/\\p[^;]*;/g, "")
+      .replace(/\\P/g, "\n")
+      .replace(/\\[FfHhWwQqTtAaCc][^;]*;/g, "")
+      .replace(/\\[LlOoKkNn]/g, "")
+      .replace(/\\~/g, " ")
+      .replace(/[{}]/g, "")
+      .replace(/%%[cC]/g, "Ø").replace(/%%[dD]/g, "°").replace(/%%[pP]/g, "±").replace(/%%%/g, "%")
+      .replace(/\u0001/g, "\\").replace(/\u0002/g, "{").replace(/\u0003/g, "}");
+    return text.split("\n");
   }
+  mtext(entity) {
+    const h = entity.textHeight;
+    if (!(h > 0)) return null;
+    let lines = this.mtextLines(entity.text);
+    // Radbrytning efter textrutans bredd (ungefärlig teckenbredd, eftersom typsnittet väljs först i appen)
+    const width = entity.rectWidth > 0 ? entity.rectWidth : 0;
+    if (width > 0) {
+      const maxChars = Math.max(1, Math.floor(width / (h * 0.62)));
+      lines = lines.flatMap((line) => {
+        if (line.length <= maxChars) return [line];
+        const out = [];
+        let cur = "";
+        for (const word of line.split(/ +/)) {
+          if (cur && (cur + " " + word).length > maxChars) { out.push(cur); cur = word; }
+          else cur = cur ? cur + " " + word : word;
+        }
+        if (cur) out.push(cur);
+        return out;
+      });
+    }
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    if (!lines.some((l) => l.trim())) return null;
+    const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const ap = entity.attachmentPoint >= 1 && entity.attachmentPoint <= 9 ? entity.attachmentPoint : 1;
+    const col = (ap - 1) % 3, row = Math.floor((ap - 1) / 3);
+    const anchor = ["start", "middle", "end"][col];
+    const spacing = h * (5 / 3) * (entity.lineSpacing > 0 ? entity.lineSpacing : 1);
+    const n = lines.length;
+    const total = h + (n - 1) * spacing;
+    // Första radens baslinje relativt fästpunkten (y uppåt)
+    const y0 = row === 0 ? -h : row === 1 ? -h + total / 2 : (n - 1) * spacing;
+    let rot = entity.rotation || 0;
+    if (entity.direction && (entity.direction.x || entity.direction.y)) rot = Math.atan2(entity.direction.y, entity.direction.x);
+    const ip = entity.insertionPoint;
+    const texts = lines.map((line, i) => line.trim() ? `<text x="0" y="0" font-size="${h}" text-anchor="${anchor}" transform="translate(0,${y0 - i * spacing}) scale(1,-1)">${esc(line)}</text>` : "").join("");
+    const maxLen = Math.max(...lines.map((l) => l.length)) * h * 0.62;
+    const x0 = col === 0 ? 0 : col === 1 ? -maxLen / 2 : -maxLen;
+    const cos = Math.cos(rot), sin = Math.sin(rot);
+    const bbox = new Box2D();
+    for (const [x, y] of [[x0, y0 + h], [x0 + maxLen, y0 + h], [x0, y0 - (n - 1) * spacing], [x0 + maxLen, y0 - (n - 1) * spacing]]) {
+      bbox.expandByPoint({ x: ip.x + x * cos - y * sin, y: ip.y + x * sin + y * cos });
+    }
+    return { bbox, element: `<g data-style="${styleAttr(entity.styleName)}" transform="translate(${ip.x},${ip.y}) rotate(${rot * 180 / Math.PI})">${texts}</g>` };
+  }
+  // DWG-visare: tabell. AutoCAD sparar tabellen som ett färdigritat anonymt block (*T…)
+  // i tabellens egna koordinater, så det ritas som en blockreferens.
   table(entity) {
+    const handle = entity.blockRecordHandle;
+    const record = handle && this.blockByHandle?.get(handle);
+    const p = entity.startPoint;
+    const placed = p && (p.x || p.y || entity.rowCount > 0);
+    if (!record || !placed) return null;
+    const d = entity.directionVector;
+    const rotation = d && (d.x || d.y) ? Math.atan2(d.y, d.x) : 0;
+    return this.insert({ name: record.name, insertionPoint: p, xScale: 1, yScale: 1, rotation });
+  }
+  oldTable(entity) {
     const {
       rowCount,
       columnCount,
@@ -5749,6 +5801,7 @@ class SvgConverter {
     };
   }
   dimension(entity) {
+    this.useBlock(entity.name);
     const block = this.getBlock(entity.name);
     if (block) {
       return {
@@ -5783,6 +5836,7 @@ class SvgConverter {
   // DWG-visare: blockreferens som i AutoCAD: blockets baspunkt hamnar i insättningspunkten,
   // sedan skala, rotation och (för MINSERT) rader och kolumner.
   insert(entity) {
+    this.useBlock(entity.name);
     const block = this.getBlock(entity.name);
     if (!block) return null;
     const ins = entity.insertionPoint;
@@ -6008,6 +6062,167 @@ class SvgConverter {
     }
     return parts.length ? parts.join("") : null;
   }
+  // DWG-visare: fler objekttyper
+  pathOf(points, closed = false) {
+    return "M" + points.map((p) => `${p.x},${p.y}`).join("L") + (closed ? "Z" : "");
+  }
+  bboxOf(points) {
+    const bbox = new Box2D();
+    for (const p of points) if (p && isFinite(p.x) && isFinite(p.y)) bbox.expandByPoint(p);
+    return bbox;
+  }
+  // Ifylld pil (som AutoCAD:s standardpil) med spetsen i tip, riktad bort från from
+  arrowhead(tip, from, size) {
+    const dx = from.x - tip.x, dy = from.y - tip.y, len = Math.hypot(dx, dy);
+    if (!(len > 0) || !(size > 0)) return "";
+    const ux = dx / len, uy = dy / len, w = size / 6;
+    const bx = tip.x + ux * size, by = tip.y + uy * size;
+    return `<path d="M${tip.x},${tip.y}L${bx - uy * w},${by + ux * w}L${bx + uy * w},${by - ux * w}Z" stroke="none" />`;
+  }
+  point(entity) {
+    const p = entity.position;
+    if (!p) return null;
+    const mode = Number(this.header.PDMODE) || 0;
+    const bbox = this.bboxOf([p]);
+    if ((mode & 31) === 1 && !(mode & 96)) return { bbox, element: "" };
+    // Storlek: PDSIZE > 0 i ritningsenheter, annars en andel av ritningens höjd
+    let size = Number(this.header.PDSIZE) || 0;
+    if (size <= 0) size = (this.drawingHeight || 100) * (size < 0 ? -size / 100 : 0.05);
+    const r = size / 2, parts = [];
+    const shape = mode & 31;
+    if (shape === 0) parts.push(`M${p.x},${p.y}l0,0`);
+    if (shape === 2) parts.push(`M${p.x - r},${p.y}h${size}M${p.x},${p.y - r}v${size}`);
+    if (shape === 3) parts.push(`M${p.x - r},${p.y - r}l${size},${size}M${p.x - r},${p.y + r}l${size},${-size}`);
+    if (shape === 4) parts.push(`M${p.x},${p.y}v${r}`);
+    if (mode & 32) parts.push(`M${p.x + r},${p.y}A${r},${r} 0 1 0 ${p.x - r},${p.y}A${r},${r} 0 1 0 ${p.x + r},${p.y}`);
+    if (mode & 64) parts.push(`M${p.x - r},${p.y - r}h${size}v${size}h${-size}Z`);
+    if (shape || mode & 96) bbox.expandByPoint({ x: p.x - r, y: p.y - r }).expandByPoint({ x: p.x + r, y: p.y + r });
+    // En punkt (läge 0) ritas som en liten prick
+    const dot = shape === 0 ? ' stroke-linecap="round" style="stroke-width:3px"' : "";
+    return { bbox, element: `<path d="${parts.join("")}" fill="none"${dot} />` };
+  }
+  face3d(entity) {
+    const c = [entity.corner1, entity.corner2, entity.corner3, entity.corner4 || entity.corner3];
+    if (c.some((p) => !p)) return null;
+    // Flagga 1, 2, 4, 8 = kant 1-4 osynlig
+    let d = "";
+    for (let i = 0; i < 4; i++) {
+      if (entity.flag & 1 << i) continue;
+      const a = c[i], b = c[(i + 1) % 4];
+      if (a.x !== b.x || a.y !== b.y) d += `M${a.x},${a.y}L${b.x},${b.y}`;
+    }
+    return { bbox: this.bboxOf(c), element: d ? `<path d="${d}" fill="none" />` : "" };
+  }
+  wipeout(entity) {
+    const u = entity.uPixel, v = entity.vPixel, ins = entity.position;
+    let pts = entity.clippingBoundaryPath || [];
+    if (!u || !v || !ins || pts.length < 2) return null;
+    if (pts.length === 2) {
+      const [a, b] = pts;
+      pts = [{ x: a.x, y: a.y }, { x: b.x, y: a.y }, { x: b.x, y: b.y }, { x: a.x, y: b.y }];
+    }
+    // Gränsens origo är bildens övre vänstra hörn och y går nedåt
+    const height = entity.imageSize?.y || 1;
+    const ox = ins.x + u.x * 0.5 - v.x * 0.5, oy = ins.y + u.y * 0.5 - v.y * 0.5;
+    const world = pts.map((p) => ({ x: ox + u.x * p.x + v.x * (height - p.y), y: oy + u.y * p.x + v.y * (height - p.y) }));
+    // Fylls med bakgrundsfärgen så att det bakom döljs (vitt på papper)
+    return { bbox: this.bboxOf(world), element: `<path d="${this.pathOf(world, true)}" stroke="none" style="fill:var(--canvas, #fff)" />` };
+  }
+  tolerance(entity) {
+    const ip = entity.insertionPoint;
+    if (!ip || !entity.text) return null;
+    const h = (Number(this.header.DIMTXT) || 2.5) * (Number(this.header.DIMSCALE) || 1);
+    const gdt = { a: "∠", b: "⊥", c: "⏥", d: "⌓", e: "○", f: "∥", g: "⌭", h: "↗", i: "⌯", j: "⌖", k: "⌒", l: "Ⓛ", m: "Ⓜ", n: "⌀", p: "Ⓟ", r: "◎", s: "Ⓢ", t: "⌰", u: "⏤" };
+    const decode = (t) => t.replace(/\{\\Fgdt;([a-z])\}/gi, (_, c) => gdt[c.toLowerCase()] || c).replace(/\\Fgdt;([a-z])/gi, (_, c) => gdt[c.toLowerCase()] || c)
+      .replace(/[{}]/g, "").replace(/%%[cC]/g, "Ø").replace(/%%[dD]/g, "°").replace(/%%[pP]/g, "±")
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const rows = String(entity.text).split(/\n|\^J/);
+    const boxH = h * 2;
+    let parts = "", maxW = 0;
+    rows.forEach((row, r) => {
+      const cells = row.split("%%v").map(decode).filter((c) => c.trim());
+      let x = 0;
+      const y = -r * boxH;
+      for (const cell of cells) {
+        const w = Math.max(boxH, cell.length * h * 0.8 + h);
+        parts += `<path d="M${x},${y - h}h${w}v${boxH}h${-w}Z" fill="none" />`;
+        parts += `<text x="0" y="0" font-size="${h}" text-anchor="middle" dominant-baseline="central" transform="translate(${x + w / 2},${y}) scale(1,-1)">${cell}</text>`;
+        x += w;
+      }
+      maxW = Math.max(maxW, x);
+    });
+    if (!parts) return null;
+    const dir = entity.xAxisDirection;
+    const rot = dir && (dir.x || dir.y) ? Math.atan2(dir.y, dir.x) : 0;
+    const cos = Math.cos(rot), sin = Math.sin(rot);
+    const corners = [[0, h], [maxW, h], [0, h - rows.length * boxH], [maxW, h - rows.length * boxH]].map(([x, y]) => ({ x: ip.x + x * cos - y * sin, y: ip.y + x * sin + y * cos }));
+    return { bbox: this.bboxOf(corners), element: `<g transform="translate(${ip.x},${ip.y}) rotate(${rot * 180 / Math.PI})">${parts}</g>` };
+  }
+  mline(entity) {
+    const vs = entity.vertices || [];
+    if (vs.length < 2) return null;
+    const closed = !!(entity.flags & 2);
+    const count = Math.max(...vs.map((v) => v.lines?.length || 0));
+    let d = "";
+    const all = [];
+    // Varje element (linje) går genom hörnet förskjutet längs geringsriktningen
+    for (let i = 0; i < count; i++) {
+      const pts = vs.map((v) => {
+        const off = v.lines?.[i]?.segmentParams?.[0] || 0;
+        return { x: v.vertex.x + v.miterDirection.x * off, y: v.vertex.y + v.miterDirection.y * off };
+      });
+      d += this.pathOf(pts, closed);
+      all.push(...pts);
+    }
+    // Ändar: linje mellan första och sista elementet i start och slut
+    if (!closed && count > 1) {
+      for (const v of [vs[0], vs[vs.length - 1]]) {
+        const offs = (v.lines || []).map((l) => l.segmentParams?.[0] || 0);
+        const a = Math.min(...offs), b = Math.max(...offs);
+        d += `M${v.vertex.x + v.miterDirection.x * a},${v.vertex.y + v.miterDirection.y * a}L${v.vertex.x + v.miterDirection.x * b},${v.vertex.y + v.miterDirection.y * b}`;
+      }
+    }
+    return { bbox: this.bboxOf(all), element: `<path d="${d}" fill="none" />` };
+  }
+  leader(entity) {
+    const vs = (entity.vertices || []).filter((p) => p && isFinite(p.x) && isFinite(p.y));
+    if (vs.length < 2) return null;
+    const size = (Number(this.header.DIMASZ) || 2.5) * (Number(this.header.DIMSCALE) || 1);
+    const arrow = entity.isArrowheadEnabled !== false ? this.arrowhead(vs[0], vs[1], size) : "";
+    return { bbox: this.bboxOf(vs), element: `<path d="${this.pathOf(vs)}" fill="none" />${arrow}` };
+  }
+  multileader(entity) {
+    let element = "";
+    const pts = [];
+    const scale = entity.contentScale > 0 ? entity.contentScale : 1;
+    for (const section of entity.leaderSections || []) {
+      const last = section.lastLeaderLinePointSet !== false ? section.lastLeaderLinePoint : null;
+      for (const line of section.leaderLines || []) {
+        const vs = [...(line.vertices || []), ...(last ? [last] : [])].filter((p) => p && isFinite(p.x) && isFinite(p.y));
+        if (vs.length < 2) continue;
+        element += `<path d="${this.pathOf(vs)}" fill="none" />`;
+        if (entity.leaderLineType !== 0) element += this.arrowhead(vs[0], vs[1], (entity.arrowheadSize || 0) * scale);
+        pts.push(...vs);
+      }
+      // Avsatsen (dogleg) från sista punkten mot texten
+      const dv = section.doglegVector, dl = section.doglegLength ?? entity.doglegLength;
+      if (last && entity.doglegEnabled !== false && dv && dl > 0) {
+        const end = { x: last.x + dv.x * dl * scale, y: last.y + dv.y * dl * scale };
+        element += `<path d="M${last.x},${last.y}L${end.x},${end.y}" fill="none" />`;
+        pts.push(last, end);
+      }
+    }
+    if (entity.hasMText !== false && entity.textContent && entity.textAnchor) {
+      const t = this.mtext({ text: entity.textContent, textHeight: (entity.textHeight || 2.5) * scale, insertionPoint: entity.textAnchor,
+        attachmentPoint: entity.textAttachmentPoint || 1, rectWidth: entity.textWidth > 0 && entity.textColumnType ? entity.textWidth : 0,
+        rotation: entity.textRotation || 0, direction: entity.textDirection, lineSpacing: entity.textLineSpacingFactor });
+      if (t) {
+        element += t.element;
+        pts.push(t.bbox.min, t.bbox.max);
+      }
+    }
+    return element ? { bbox: this.bboxOf(pts), element } : null;
+  }
   blockId(name) {
     if (!this.blockIds.has(name)) this.blockIds.set(name, `blk-${this.blockIds.size + 1}`);
     return this.blockIds.get(name);
@@ -6024,17 +6239,68 @@ class SvgConverter {
     if (item) this.blockParts.push(item.element);
     return item;
   }
+  // DWG-visare: statistik per block, så att bara block som faktiskt används räknas
+  count(blockName, type, outcome) {
+    if (!this.stats) this.stats = /* @__PURE__ */ new Map();
+    if (!this.stats.has(blockName)) this.stats.set(blockName, {});
+    const byType = this.stats.get(blockName);
+    byType[type] = byType[type] || { drawn: 0, skipped: 0, failed: 0 };
+    byType[type][outcome]++;
+  }
+  useBlock(name) {
+    if (!this.blockUses) this.blockUses = /* @__PURE__ */ new Map();
+    const from = this.currentBlock || "";
+    if (!this.blockUses.has(from)) this.blockUses.set(from, /* @__PURE__ */ new Set());
+    this.blockUses.get(from).add(name);
+  }
+  summary() {
+    const types = {};
+    const reached = /* @__PURE__ */ new Set();
+    const queue = [this.modelSpaceName];
+    while (queue.length) {
+      const name = queue.shift();
+      if (reached.has(name)) continue;
+      reached.add(name);
+      for (const next of this.blockUses?.get(name) || []) queue.push(next);
+    }
+    for (const name of reached) {
+      for (const [type, c] of Object.entries(this.stats?.get(name) || {})) {
+        const t = types[type] = types[type] || { drawn: 0, skipped: 0, failed: 0 };
+        t.drawn += c.drawn; t.skipped += c.skipped; t.failed += c.failed;
+      }
+    }
+    let paperSpace = 0;
+    for (const b of this.dwg?.tables?.BLOCK_RECORD?.entries || []) {
+      if (/^\*paper_space/i.test(b.name)) paperSpace += (b.entities || []).filter((e) => e.type !== "VIEWPORT").length;
+    }
+    return { types, paperSpace };
+  }
   block(block, dwg) {
     if (!block) return null;
     const inBlock = !isModelSpace(block.name);
+    if (!inBlock) this.modelSpaceName = block.name;
+    const previousBlock = this.currentBlock;
+    this.currentBlock = block.name;
+    try {
+      return this.blockInner(block, dwg, inBlock);
+    } finally {
+      this.currentBlock = previousBlock;
+    }
+  }
+  blockInner(block, dwg, inBlock) {
     const entities = block.entities || [];
     const { bbox, elements } = entities.reduce(
       (acc, entity) => {
         if (this.hiddenLayers && this.hiddenLayers.has(String(entity.layer).toLowerCase())) return acc;
         if (entity.isVisible === false) return acc;
+        // ATTDEF inuti block visas aldrig (värdet visas som attribut på blockreferensen) och
+        // VIEWPORT hör till layouterna, så de räknas inte som saknade
+        const counted = !(entity.type === "VIEWPORT" || entity.type === "ATTDEF" && inBlock);
         let boundsAndElement = null;
+        let failed = false;
         // DWG-visare: hoppa över enskilda objekt som inte går att rita i stället för att hela ritningen misslyckas
-        try { boundsAndElement = this.entityToBoundsAndElement(entity); } catch (err) { console.warn("Hoppar över", entity.type, err); }
+        try { boundsAndElement = this.entityToBoundsAndElement(entity); } catch (err) { failed = true; console.warn("Hoppar över", entity.type, err); }
+        if (counted) this.count(block.name, entity.type, boundsAndElement ? "drawn" : failed ? "failed" : "skipped");
         // DWG-visare: objekt i ett objektkoordinatsystem med Z-axeln nedåt (t.ex. efter
         // spegling) har spegelvänd X. Funktionen fanns men anropades aldrig.
         if (boundsAndElement && OCS_TYPES.has(entity.type)) boundsAndElement = this.addFlipXIfApplicable(entity, boundsAndElement);
@@ -6170,6 +6436,33 @@ class SvgConverter {
       case "HATCH":
         result = this.hatch(entity);
         break;
+      case "POINT":
+        result = this.point(entity);
+        break;
+      case "3DFACE":
+        result = this.face3d(entity);
+        break;
+      case "ATTDEF":
+        // Attributdefinitioner syns bara när de ligger direkt i modellrymden; då visas taggen
+        if (this.currentBlock && isModelSpace(this.currentBlock) && entity.text) {
+          result = this.singleLineText({ ...entity.text, text: entity.tag });
+        }
+        break;
+      case "WIPEOUT":
+        result = this.wipeout(entity);
+        break;
+      case "TOLERANCE":
+        result = this.tolerance(entity);
+        break;
+      case "MLINE":
+        result = this.mline(entity);
+        break;
+      case "LEADER":
+        result = this.leader(entity);
+        break;
+      case "MULTILEADER":
+        result = this.multileader(entity);
+        break;
       case "SOLID": {
         // DWG-visare: fylld triangel/fyrhörning (t.ex. måttpilar). Hörnen ligger i ordningen 1, 2, 4, 3.
         const c = [entity.corner1, entity.corner2, entity.corner4 || entity.corner3, entity.corner3].filter((p) => p && isFinite(p.x) && isFinite(p.y));
@@ -6234,13 +6527,18 @@ class SvgConverter {
     this.hiddenLayers = new Set(
       (dwg.tables.LAYER.entries || []).filter((l) => l.off || l.frozen).map((l) => String(l.name).toLowerCase())
     );
+    this.blockByHandle = /* @__PURE__ */ new Map();
     dwg.tables.BLOCK_RECORD.entries.forEach((block) => {
+      if (block.handle) this.blockByHandle.set(block.handle, block);
       if (isModelSpace(block.name)) {
         modelSpace = block;
       } else {
         this.blockRecords.set(block.name, block);
       }
     });
+    this.header = dwg.header || {};
+    const ext0 = this.header.EXTMIN, ext1 = this.header.EXTMAX;
+    this.drawingHeight = ext0 && ext1 && isFinite(ext1.y - ext0.y) && ext1.y > ext0.y ? ext1.y - ext0.y : 100;
     for (const name of this.blockRecords.keys()) this.getBlock(name);
     const ms = this.block(modelSpace, dwg);
     const blockElements = this.blockParts.join("");
@@ -6428,7 +6726,10 @@ const _LibreDwg = class _LibreDwg {
    */
   dwg_to_svg(data) {
     const converter = new SvgConverter();
-    return converter.convert(data);
+    const svg = converter.convert(data);
+    // DWG-visare: vad som ritades och vad som inte gick att visa
+    this.lastSvgStats = converter.summary();
+    return svg;
   }
   /**
    * Frees the whole DWG. all tables, sections, objects, ...
@@ -7547,9 +7848,9 @@ const _LibreDwg = class _LibreDwg {
 __publicField(_LibreDwg, "instance");
 let LibreDwg = _LibreDwg;
 // DWG-visare: objekttyper vars koordinater ligger i ett objektkoordinatsystem (OCS)
-const OCS_TYPES = /* @__PURE__ */ new Set(["ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE2D", "TEXT", "INSERT", "HATCH", "SOLID"]);
+const OCS_TYPES = /* @__PURE__ */ new Set(["ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE2D", "TEXT", "INSERT", "HATCH", "SOLID", "ATTDEF"]);
 // DWG-visare: objekttyper som fylls med sin färg
-const FILL_TYPES = /* @__PURE__ */ new Set(["TEXT", "MTEXT", "HATCH", "SOLID"]);
+const FILL_TYPES = /* @__PURE__ */ new Set(["TEXT", "MTEXT", "HATCH", "SOLID", "ATTDEF", "TOLERANCE", "LEADER", "MULTILEADER", "ACAD_TABLE", "TABLE"]);
 // DWG-visare: textstilens namn som säkert attributvärde
 function styleAttr(name) {
   return String(name || "STANDARD").replace(/[&"<>]/g, "");
