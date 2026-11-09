@@ -83,7 +83,7 @@ Objekt på lager som är släckta eller frysta visas inte, precis som i AutoCAD.
 
 ## Objekt från tilläggsprogram (MagiCAD m.fl.)
 
-Program som MagiCAD lägger in egna objekttyper i ritningen, t.ex. kablar, kabeltexter, apparater och pilar (MAGIELECTRICALCABLE, MAGIELECTRICALDIMTEXT, MAGIELECTRICALDEVICE …). Sådana objekt sparar en kopia av sin grafik i filen (proxygrafik). Appen ritar den kopian, precis som TrueView och AutoCAD gör när tilläggsprogrammet inte är installerat. I statusraden räknas objekten under sitt klassnamn.
+Program som MagiCAD lägger in egna objekttyper i ritningen, t.ex. kablar, kabeltexter, apparater och pilar (MAGIELECTRICALCABLE, MAGIELECTRICALDIMTEXT, MAGIELECTRICALDEVICE …). Sådana objekt sparar en kopia av sin grafik i filen (proxygrafik). Appen ritar den kopian, precis som TrueView och AutoCAD gör när tilläggsprogrammet inte är installerat. I statusraden räknas objekten under sitt klassnamn. Lägger tilläggsprogrammet samma text både i sin grafik och som vanlig text på samma ställe visas den bara en gång.
 
 ## Visas allt?
 

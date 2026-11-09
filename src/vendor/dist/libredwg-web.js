@@ -6190,6 +6190,7 @@ class SvgConverter {
     const bbox = new Box2D();
     const snaps = [];
     const parts = [];
+    let duplicates = 0;
     const layerColor = () => {
       const layer = this.layerMap.get(String(layerName).toLowerCase());
       if (!layer) return entityColor;
@@ -6275,6 +6276,9 @@ class SvgConverter {
             const scale = Math.hypot(...Object.values(tv(1, 0))) || 1;
             const h = h0 * scale;
             if (!(h > 0) || !t.str.trim()) break;
+            // Tilläggsprogram som MagiCAD lägger ofta samma text även som vanlig MTEXT/TEXT
+            // på nästan samma ställe. Visa den bara en gång.
+            if (this.hasTextTwin(t.str, p, h)) { duplicates++; break; }
             const ang = Math.atan2(dir.y, dir.x) * 180 / Math.PI;
             add(p); add({ x: p.x + t.str.length * h * 0.7 * Math.cos(ang * Math.PI / 180), y: p.y + h + t.str.length * h * 0.7 * Math.sin(ang * Math.PI / 180) });
             snaps.push(p);
@@ -6327,7 +6331,7 @@ class SvgConverter {
       }
       i += size;
     }
-    if (!parts.length) return null;
+    if (!parts.length) return duplicates ? { bbox, element: "", snaps } : null;
     // Färg 7 (vit) ska följa bakgrunden som i resten av ritningen; det sköter appen via fill/stroke-attributen
     return { bbox, element: parts.join(""), snaps };
   }
@@ -6566,6 +6570,38 @@ class SvgConverter {
   }
   blockInner(block, dwg, inBlock) {
     const entities = block.entities || [];
+    // Vanliga texter i blocket, så att proxygrafikens kopior av samma text kan hoppas över
+    const previousTextIndex = this.textIndex;
+    this.textIndex = this.buildTextIndex(entities);
+    try {
+      return this.blockBody(block, dwg, inBlock, entities);
+    } finally {
+      this.textIndex = previousTextIndex;
+    }
+  }
+  // DWG-visare: index över TEXT och MTEXT (rad för rad) med position och höjd
+  buildTextIndex(entities) {
+    const index = /* @__PURE__ */ new Map();
+    const put = (text, p, h) => {
+      const key = normalizeText(text);
+      if (!key || !p || !(h > 0)) return;
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push({ x: p.x, y: p.y, h });
+    };
+    for (const e of entities) {
+      if (this.hiddenLayers && this.hiddenLayers.has(String(e.layer).toLowerCase())) continue;
+      if (e.type === "TEXT") put(e.text, e.startPoint, e.textHeight);
+      else if (e.type === "MTEXT") for (const line of this.mtextLines(e.text)) put(line, e.insertionPoint, e.textHeight);
+    }
+    return index;
+  }
+  // Finns samma text som vanlig text nära samma ställe?
+  hasTextTwin(text, p, h) {
+    const list = this.textIndex?.get(normalizeText(text));
+    if (!list) return false;
+    return list.some((t) => Math.abs(t.x - p.x) < 3 * Math.max(h, t.h) && Math.abs(t.y - p.y) < 3 * Math.max(h, t.h));
+  }
+  blockBody(block, dwg, inBlock, entities) {
     // Fästpunkter för mätverktyget, i blockets egna koordinater
     const snaps = [];
     const { bbox, elements } = entities.reduce(
@@ -8163,6 +8199,10 @@ function pointInPolygon(p, poly) {
     if (a.y > p.y !== b.y > p.y && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
   }
   return inside;
+}
+// DWG-visare: jämför texter utan mellanslag i kanterna och utan skillnad i skiftläge
+function normalizeText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 function hexToBytes(hex) {
   const out = new Uint8Array(hex.length >> 1);
