@@ -53,21 +53,45 @@ function size() {
   return { w: viewport.clientWidth || 1, h: viewport.clientHeight || 1 };
 }
 
+// Att rita om hela ritningen vid varje zoom- eller panoreringssteg är långsamt i stora
+// ritningar. Under rörelsen flyttas och skalas därför den redan ritade bilden med en
+// CSS-transform, och när musen har stått still en stund ritas den om skarpt.
+let committed = null;
+let commitTimer = 0;
+
 function applyView() {
   frame = 0;
+  clearTimeout(commitTimer);
   if (!svg) return;
   const { w, h } = size();
   const vw = w * view.upp;
   const vh = h * view.upp;
   svg.setAttribute('viewBox', `${view.cx - vw / 2} ${view.cy - vh / 2} ${vw} ${vh}`);
+  svg.style.transform = '';
   // Skärmpixlar per ritningsenhet, för linjetypernas streck
   svg.style.setProperty('--z', String(1 / view.upp));
+  committed = { svg, cx: view.cx, cy: view.cy, upp: view.upp, w, h };
   $('st-zoom').textContent = formatZoom(fitUpp / view.upp);
   drawGuides();
 }
 
+function previewView() {
+  frame = 0;
+  if (!svg) return;
+  const { w, h } = size();
+  if (!committed || committed.svg !== svg || committed.w !== w || committed.h !== h) { applyView(); return; }
+  const k = committed.upp / view.upp;
+  const tx = (committed.cx - view.cx) / view.upp, ty = (committed.cy - view.cy) / view.upp;
+  svg.style.transformOrigin = '50% 50%';
+  svg.style.transform = `translate(${tx}px, ${ty}px) scale(${k})`;
+  $('st-zoom').textContent = formatZoom(fitUpp / view.upp);
+  drawGuides();
+  clearTimeout(commitTimer);
+  commitTimer = setTimeout(applyView, 160);
+}
+
 function scheduleView() {
-  if (!frame) frame = requestAnimationFrame(applyView);
+  if (!frame) frame = requestAnimationFrame(previewView);
 }
 
 function fit() {
@@ -216,7 +240,7 @@ viewport.addEventListener('keydown', (e) => {
   if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
 });
 
-new ResizeObserver(() => scheduleView()).observe(viewport);
+new ResizeObserver(() => requestAnimationFrame(applyView)).observe(viewport);
 
 // ---------- Öppna ritning ----------
 
@@ -259,6 +283,9 @@ async function readDrawing(name, data, filePath) {
     if (!tab) throw new Error(`${name} verkar vara tom. Det finns inga objekt i modellrymden att visa.`);
     tab.version = describeVersion(version);
     tab.fonts = await applyFonts(tab.svg, db.tables?.STYLE?.entries || [], filePath);
+    // Typsnitten måste vara laddade innan texten mäts
+    try { await document.fonts.load(`100px "${SHX_SUBSTITUTE}"`); await document.fonts.ready; } catch { /* mät med det som finns */ }
+    wrapMText(tab.svg);
     tab.xrefs = xrefs;
     tab.content = content;
     tab.snap = buildSnapIndex(snapPoints);
@@ -455,7 +482,8 @@ const XREF_TEXT = {
 
 async function attachXrefs(lib, db, hostPath, depth, seen) {
   const results = [];
-  const records = (db.tables?.BLOCK_RECORD?.entries || []).filter((b) => b && (b.isXref || b.xrefPath));
+  // Ett block med sökväg men eget innehåll är infogat från en fil, inte en xref
+  const records = (db.tables?.BLOCK_RECORD?.entries || []).filter((b) => b && (b.isXref || b.xrefPath && !(b.entities || []).length));
   for (const rec of records) {
     const result = { name: rec.name, path: rec.xrefPath || rec.name, depth, status: 'missing' };
     results.push(result);
@@ -598,6 +626,43 @@ function showXrefStatus(xrefs) {
   el.title = 'Externa referenser (xref):\n' + xrefs
     .map((x) => `${'   '.repeat(x.depth)}${x.name}: ${XREF_TEXT[x.status]} (${x.path})`).join('\n') +
     (problems ? '\n\nLägg xref-filerna i samma mapp som ritningen, eller där sökvägen pekar.' : '');
+}
+
+// Flerradig text bryts efter textrutans bredd, mätt med det typsnitt texten faktiskt får.
+// Konverteraren lägger varje stycke på en rad och markerar gruppen med data-wrap.
+const measureCanvas = document.createElement('canvas').getContext('2d');
+function wrapMText(root) {
+  for (const g of root.querySelectorAll('g[data-wrap]')) {
+    const width = Number(g.dataset.wrap), h = Number(g.dataset.h), spacing = Number(g.dataset.spacing), row = Number(g.dataset.row);
+    const texts = [...g.querySelectorAll(':scope > text')];
+    if (!texts.length || !(width > 0) || !(h > 0)) continue;
+    const family = (g.style.fontFamily || g.closest('[style*="font-family"]')?.style.fontFamily || 'Arial, sans-serif');
+    measureCanvas.font = `100px ${family}`;
+    const measure = (t) => measureCanvas.measureText(t).width * h / 100;
+    // Lite marginal, eftersom AutoCAD:s typsnitt sällan är exakt lika breda
+    const limit = width * 1.02;
+    const lines = [];
+    for (const t of texts) {
+      const words = t.textContent.split(/ +/);
+      let cur = '';
+      for (const word of words) {
+        const next = cur ? cur + ' ' + word : word;
+        if (cur && measure(next) > limit) { lines.push(cur); cur = word; } else cur = next;
+      }
+      lines.push(cur);
+    }
+    if (lines.length === texts.length) continue;
+    const n = lines.length, total = h + (n - 1) * spacing;
+    const y0 = row === 0 ? -h : row === 1 ? -h + total / 2 : (n - 1) * spacing;
+    const template = texts[0];
+    for (const t of texts) t.remove();
+    lines.forEach((line, i) => {
+      const t = template.cloneNode(false);
+      t.textContent = line;
+      t.setAttribute('transform', `translate(0,${y0 - i * spacing}) scale(1,-1)`);
+      g.appendChild(t);
+    });
+  }
 }
 
 function showFontStatus(fonts) {

@@ -1375,6 +1375,12 @@ class LibreEntityConverter {
         return this.convertXline(entity_tio, commonAttrs);
       } else if (fixedtype === Dwg_Object_Type.DWG_TYPE_UNKNOWN_ENT) {
         this.unknownEntityCount++;
+        // DWG-visare: objekt från tilläggsprogram (t.ex. MagiCAD) som biblioteket inte känner till.
+        // De sparar en kopia av sin grafik (proxygrafik), som AutoCAD och TrueView visar.
+        let graphics = null, className = "";
+        try { graphics = libredwg.dwg_entity_get_preview(object_ptr); } catch { graphics = null; }
+        try { className = libredwg.wasmInstance.dwg_object_get_dxfname(object_ptr) || ""; } catch { className = ""; }
+        return { type: "PROXY_GRAPHICS", className, ...commonAttrs, graphics: graphics && graphics.length ? graphics : null };
       }
     }
     return void 0;
@@ -5480,22 +5486,8 @@ class SvgConverter {
     const h = entity.textHeight;
     if (!(h > 0)) return null;
     let lines = this.mtextLines(entity.text);
-    // Radbrytning efter textrutans bredd (ungefärlig teckenbredd, eftersom typsnittet väljs först i appen)
+    // Radbrytning efter textrutans bredd görs i appen när typsnittet är känt (data-wrap)
     const width = entity.rectWidth > 0 ? entity.rectWidth : 0;
-    if (width > 0) {
-      const maxChars = Math.max(1, Math.floor(width / (h * 0.62)));
-      lines = lines.flatMap((line) => {
-        if (line.length <= maxChars) return [line];
-        const out = [];
-        let cur = "";
-        for (const word of line.split(/ +/)) {
-          if (cur && (cur + " " + word).length > maxChars) { out.push(cur); cur = word; }
-          else cur = cur ? cur + " " + word : word;
-        }
-        if (cur) out.push(cur);
-        return out;
-      });
-    }
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
     if (!lines.some((l) => l.trim())) return null;
     const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -5518,7 +5510,8 @@ class SvgConverter {
     for (const [x, y] of [[x0, y0 + h], [x0 + maxLen, y0 + h], [x0, y0 - (n - 1) * spacing], [x0 + maxLen, y0 - (n - 1) * spacing]]) {
       bbox.expandByPoint({ x: ip.x + x * cos - y * sin, y: ip.y + x * sin + y * cos });
     }
-    return { bbox, element: `<g data-style="${styleAttr(entity.styleName)}" transform="translate(${ip.x},${ip.y}) rotate(${rot * 180 / Math.PI})">${texts}</g>` };
+    const wrap = width > 0 ? ` data-wrap="${width}" data-h="${h}" data-spacing="${spacing}" data-row="${row}"` : "";
+    return { bbox, element: `<g data-style="${styleAttr(entity.styleName)}"${wrap} transform="translate(${ip.x},${ip.y}) rotate(${rot * 180 / Math.PI})">${texts}</g>` };
   }
   // DWG-visare: tabell. AutoCAD sparar tabellen som ett färdigritat anonymt block (*T…)
   // i tabellens egna koordinater, så det ritas som en blockreferens.
@@ -5839,6 +5832,8 @@ class SvgConverter {
   insert(entity) {
     this.useBlock(entity.name);
     const block = this.getBlock(entity.name);
+    // Blocket finns men allt i det ligger på dolda lager: inget att rita, men inget saknas heller
+    if (!block && this.blockRecords?.has(entity.name)) return { bbox: new Box2D(), element: "", snaps: [] };
     if (!block) return null;
     const ins = entity.insertionPoint;
     const base = block.basePoint || { x: 0, y: 0 };
@@ -6175,6 +6170,167 @@ class SvgConverter {
     }
     return out ? `<g data-style="STANDARD">${out}</g>` : "";
   }
+  // DWG-visare: proxygrafik, den kopia av sin grafik som objekt från tilläggsprogram
+  // (t.ex. MagiCAD) sparar i filen. Formatet är en följd av ritkommandon:
+  // [storlek, typ, data], föregånget av total storlek och antal kommandon.
+  proxyGraphics(entity, bytes) {
+    if (!bytes || bytes.length < 8) return null;
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const count = dv.getUint32(4, true);
+    const layers = this.layerMapSource || [];
+    const entityColor = this.getEntityColor(layers, entity).cssColor;
+    const rgbCss = (v) => `rgb(${v >> 16 & 255},${v >> 8 & 255},${v & 255})`;
+    // Tillstånd som kommandona ändrar
+    let color = null, layerName = entity.layer, fill = false, lw = null;
+    const stack = [[1, 0, 0, 1, 0, 0]];
+    let m = stack[0];
+    const tp = (x, y) => ({ x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] });
+    const tv = (x, y) => ({ x: m[0] * x + m[2] * y, y: m[1] * x + m[3] * y });
+    const bbox = new Box2D();
+    const snaps = [];
+    const parts = [];
+    const layerColor = () => {
+      const layer = this.layerMap.get(String(layerName).toLowerCase());
+      if (!layer) return entityColor;
+      return layer.colorIndex >= 1 && layer.colorIndex <= 255 ? rgbCss(AUTO_CAD_COLOR_INDEX[layer.colorIndex]) : rgbCss(layer.color ?? 16777215);
+    };
+    // color: null = objektets egen färg (ByBlock), "layer" = lagrets färg, annars en CSS-färg
+    const css = () => color === "layer" ? layerColor() : color ?? entityColor;
+    const style = () => lw != null && lw >= 0 ? ` style="stroke-width:max(1px, calc(${lw / 100}mm * var(--lwk, 1)))"` : "";
+    const hidden = () => this.hiddenLayers && this.hiddenLayers.has(String(layerName).toLowerCase());
+    const add = (p) => { bbox.expandByPoint(p); };
+    const pointsAt = (o, n) => {
+      const pts = [];
+      for (let i = 0; i < n; i++) pts.push(tp(dv.getFloat64(o + i * 24, true), dv.getFloat64(o + i * 24 + 8, true)));
+      return pts;
+    };
+    // UTF-16-text som slutar med 0 och fylls ut till jämn 4-bytegräns
+    const unicodeString = (o, end) => {
+      let str = "", i = o;
+      for (; i + 1 < end; i += 2) {
+        const c = dv.getUint16(i, true);
+        if (c === 0) { i += 2; break; }
+        str += String.fromCharCode(c);
+      }
+      const len = i - o;
+      return { str, next: o + Math.ceil(len / 4) * 4 };
+    };
+    const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    let i = 8;
+    for (let n = 0; n < count && i + 8 <= u8.length; n++) {
+      const size = dv.getUint32(i, true), type = dv.getUint32(i + 4, true);
+      if (size < 8 || i + size > u8.length) break;
+      const o = i + 8, end = i + size;
+      try {
+        switch (type) {
+          case 2: { // cirkel: centrum, radie, normal
+            if (hidden()) break;
+            const c = tp(dv.getFloat64(o, true), dv.getFloat64(o + 8, true));
+            const v = tv(dv.getFloat64(o + 24, true), 0);
+            const r = Math.hypot(v.x, v.y);
+            add({ x: c.x - r, y: c.y - r }); add({ x: c.x + r, y: c.y + r }); snaps.push(c);
+            // AutoCAD fyller inte cirklar i proxygrafik, bara polygoner
+            parts.push(`<circle cx="${c.x}" cy="${c.y}" r="${r}" stroke="${css()}" fill="none"${style()} />`);
+            break;
+          }
+          case 4: { // båge: centrum, radie, normal, startvektor, svepvinkel, typ
+            if (hidden()) break;
+            const cx = dv.getFloat64(o, true), cy = dv.getFloat64(o + 8, true), r0 = dv.getFloat64(o + 24, true);
+            const nz = dv.getFloat64(o + 48, true);
+            const sx = dv.getFloat64(o + 56, true), sy = dv.getFloat64(o + 64, true);
+            let sweep = dv.getFloat64(o + 80, true);
+            if (nz < 0) sweep = -sweep;
+            const a0 = Math.atan2(sy, sx);
+            const steps = Math.max(8, Math.min(180, Math.ceil(Math.abs(sweep) / (Math.PI / 90))));
+            const pts = [];
+            for (let k = 0; k <= steps; k++) {
+              const a = a0 + sweep * k / steps;
+              pts.push(tp(cx + r0 * Math.cos(a), cy + r0 * Math.sin(a)));
+            }
+            pts.forEach(add); snaps.push(pts[0], pts[pts.length - 1], tp(cx, cy));
+            parts.push(`<path d="${this.pathOf(pts)}" stroke="${css()}" fill="none"${style()} />`);
+            break;
+          }
+          case 6: case 7: { // polylinje / polygon
+            if (hidden()) break;
+            const nPts = dv.getUint32(o, true);
+            if (nPts < 1 || o + 4 + nPts * 24 > end) break;
+            const pts = pointsAt(o + 4, nPts);
+            pts.forEach(add); snaps.push(...pts);
+            const closed = type === 7;
+            const filled = closed && fill;
+            parts.push(`<path d="${this.pathOf(pts, closed)}" stroke="${css()}" fill="${filled ? css() : "none"}"${style()} />`);
+            break;
+          }
+          case 36: case 38: { // Unicode-text (38 = med typsnitt och stilflaggor)
+            if (hidden()) break;
+            const p = tp(dv.getFloat64(o, true), dv.getFloat64(o + 8, true));
+            const dir = tv(dv.getFloat64(o + 48, true), dv.getFloat64(o + 56, true));
+            const t = unicodeString(o + 72, end);
+            let at = t.next;
+            if (type === 38) at += 8; // längd och "raw"-flagga
+            const h0 = dv.getFloat64(at, true);
+            const width = dv.getFloat64(at + 8, true) || 1;
+            const scale = Math.hypot(...Object.values(tv(1, 0))) || 1;
+            const h = h0 * scale;
+            if (!(h > 0) || !t.str.trim()) break;
+            const ang = Math.atan2(dir.y, dir.x) * 180 / Math.PI;
+            add(p); add({ x: p.x + t.str.length * h * 0.7 * Math.cos(ang * Math.PI / 180), y: p.y + h + t.str.length * h * 0.7 * Math.sin(ang * Math.PI / 180) });
+            snaps.push(p);
+            parts.push(`<text data-style="STANDARD" x="0" y="0" font-size="${h}" fill="${css()}" stroke="none" transform="translate(${p.x},${p.y}) rotate(${ang}) scale(${width},-1)">${esc(t.str)}</text>`);
+            break;
+          }
+          case 14: { // färg: 0 = ByBlock, 256 = ByLayer, annars AutoCAD-färgindex
+            const v = dv.getInt32(o, true);
+            if (v === 256 || v < 0) color = "layer";
+            else if (v === 0) color = null;
+            else color = rgbCss(AUTO_CAD_COLOR_INDEX[v & 255] ?? 16777215);
+            break;
+          }
+          case 16: { // lager: index i lagertabellen
+            const idx = dv.getUint32(o, true);
+            if (layers[idx]) layerName = layers[idx].name;
+            break;
+          }
+          case 20: fill = dv.getUint32(o, true) === 1; break; // 1 = fyll alltid, 2 = fyll aldrig
+          case 22: { // sann färg
+            const v = dv.getUint32(o, true);
+            color = rgbCss(v & 16777215);
+            break;
+          }
+          case 23: { // linjetjocklek i hundradels mm (-1 ByLayer, -2 ByBlock, -3 standard)
+            const v = dv.getInt32(o, true);
+            lw = v >= 0 ? v : null;
+            break;
+          }
+          case 29: case 30: { // lägg till transformationsmatris (4 x 4, radvis)
+            const r = [];
+            for (let k = 0; k < 16; k++) r.push(dv.getFloat64(o + k * 8, true));
+            const a = [r[0], r[4], r[1], r[5], r[3], r[7]];
+            m = [
+              m[0] * a[0] + m[2] * a[1], m[1] * a[0] + m[3] * a[1],
+              m[0] * a[2] + m[2] * a[3], m[1] * a[2] + m[3] * a[3],
+              m[0] * a[4] + m[2] * a[5] + m[4], m[1] * a[4] + m[3] * a[5] + m[5]
+            ];
+            stack.push(m);
+            break;
+          }
+          case 31: { // ta bort senaste matrisen
+            if (stack.length > 1) stack.pop();
+            m = stack[stack.length - 1];
+            break;
+          }
+        }
+      } catch (err) {
+        console.warn("Proxygrafik: kommando", type, "kunde inte läsas", err);
+      }
+      i += size;
+    }
+    if (!parts.length) return null;
+    // Färg 7 (vit) ska följa bakgrunden som i resten av ritningen; det sköter appen via fill/stroke-attributen
+    return { bbox, element: parts.join(""), snaps };
+  }
   // DWG-visare: fler objekttyper
   pathOf(points, closed = false) {
     return "M" + points.map((p) => `${p.x},${p.y}`).join("L") + (closed ? "Z" : "");
@@ -6426,7 +6582,8 @@ class SvgConverter {
         let failed = false;
         // DWG-visare: hoppa över enskilda objekt som inte går att rita i stället för att hela ritningen misslyckas
         try { boundsAndElement = this.entityToBoundsAndElement(entity); } catch (err) { failed = true; console.warn("Hoppar över", entity.type, err); }
-        if (counted) this.count(block.name, entity.type, boundsAndElement ? "drawn" : failed ? "failed" : "skipped");
+        const countType = entity.type === "PROXY_GRAPHICS" ? entity.className || "OKÄNT_OBJEKT" : entity.type;
+        if (counted) this.count(block.name, countType, boundsAndElement ? "drawn" : failed ? "failed" : "skipped");
         let entitySnaps = [];
         if (boundsAndElement) {
           // Text i linjetyper (t.ex. ---H1---) och fästpunkter, i objektets koordinater
@@ -6579,6 +6736,12 @@ class SvgConverter {
         break;
       case "POINT":
         result = this.point(entity);
+        break;
+      case "PROXY_GRAPHICS":
+        result = entity.graphics ? this.proxyGraphics(entity, entity.graphics) : null;
+        break;
+      case "ACAD_PROXY_ENTITY":
+        result = entity.graphicsData ? this.proxyGraphics(entity, hexToBytes(entity.graphicsData)) : null;
         break;
       case "3DFACE":
         result = this.face3d(entity);
@@ -8000,6 +8163,11 @@ function pointInPolygon(p, poly) {
     if (a.y > p.y !== b.y > p.y && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
   }
   return inside;
+}
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length >> 1);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
 }
 // DWG-visare: objekttyper som fylls med sin färg
 const FILL_TYPES = /* @__PURE__ */ new Set(["TEXT", "MTEXT", "HATCH", "SOLID", "ATTDEF", "TOLERANCE", "LEADER", "MULTILEADER", "ACAD_TABLE", "TABLE"]);

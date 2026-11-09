@@ -81,6 +81,10 @@ Statusraden visar t.ex. "Xref 3". Om någon fil saknas står det i rött, t.ex. 
 
 Objekt på lager som är släckta eller frysta visas inte, precis som i AutoCAD. Färger följer AutoCAD: sann färg (RGB) på objekt och lager, färgindex 1–255, ByLayer och ByBlock. Färg 7 är vit på mörk bakgrund och svart på ljus.
 
+## Objekt från tilläggsprogram (MagiCAD m.fl.)
+
+Program som MagiCAD lägger in egna objekttyper i ritningen, t.ex. kablar, kabeltexter, apparater och pilar (MAGIELECTRICALCABLE, MAGIELECTRICALDIMTEXT, MAGIELECTRICALDEVICE …). Sådana objekt sparar en kopia av sin grafik i filen (proxygrafik). Appen ritar den kopian, precis som TrueView och AutoCAD gör när tilläggsprogrammet inte är installerat. I statusraden räknas objekten under sitt klassnamn.
+
 ## Visas allt?
 
 Statusraden visar om allt i ritningen kom med, t.ex. **Alla 312 objekt visas**. Om något inte går att visa står det i rött, t.ex. **2 av 153 objekt visas inte**. Håll muspekaren över texten för att se vilka objekttyper det gäller och varför, och hur många objekt av varje typ som ritades.

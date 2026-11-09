@@ -1,7 +1,7 @@
 {
   "name": "dwg-visare",
   "productName": "DWG-visare",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "Enkel visare för DWG-ritningar: öppna, zooma, panorera och skriv ut.",
   "author": "Kogeteknik",
   "license": "GPL-3.0",
