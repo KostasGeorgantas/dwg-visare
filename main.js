@@ -69,6 +69,7 @@ function buildMenu() {
         { label: 'Hela ritningen', accelerator: 'CmdOrCtrl+0', click: send('zoom-fit') },
         { type: 'separator' },
         { label: 'Stödlinjer av/på', accelerator: 'CmdOrCtrl+G', click: send('toggle-guides') },
+        { label: 'Mät avstånd (M)', click: send('toggle-measure') },
         { label: 'Linjetjocklek av/på', accelerator: 'CmdOrCtrl+L', click: send('toggle-lineweights') },
         { label: 'Byt bakgrund (mörk/ljus)', accelerator: 'CmdOrCtrl+B', click: send('toggle-bg') },
         { type: 'separator' },

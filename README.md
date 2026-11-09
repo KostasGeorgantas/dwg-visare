@@ -21,11 +21,18 @@ Installationsfilen är inte kodsignerad. Windows SmartScreen kan därför visa "
 | Dubbelklicka med mushjulet / Ctrl+0 | Visa hela ritningen |
 | Ctrl + / Ctrl − | Zooma in / ut |
 | Piltangenterna | Panorera |
+| **Mät** / M | Mät avstånd: klicka på två punkter. Esc rensar mätningen, Esc igen avslutar |
 | **Linjetjocklek** / Ctrl+L | Visa eller dölj linjetjocklekar på skärmen |
 | Ctrl+B | Byt mellan mörk och ljus bakgrund |
 | **Skriv ut** / Ctrl+P | Skriv ut det som syns i fönstret, anpassat till papperet |
 
 På skärmen visas ritningens färger. För utskriften väljer du **Färg** eller **Svartvit** uppe till höger. Med Svartvit blir alla linjer och texter svarta på papperet. Vit (AutoCAD-färg 7) blir alltid svart.
+
+## Mäta
+
+Klicka på **Mät** (eller tryck M) och klicka sedan på två punkter i ritningen. Avståndet visas vid linjen och i statusraden tillsammans med ΔX, ΔY och vinkeln, i ritningens enheter (t.ex. mm).
+
+Musen fäster mot punkter i ritningen när den är nära: ändpunkter och mittpunkter på linjer, hörn på polylinjer, centrum och kvadrantpunkter på cirklar, ändpunkter på bågar, insättningspunkter för block och text. Det gäller även innehållet i block och xrefs. En fyrkant visar vilken punkt musen fäster mot. Det går att zooma och panorera som vanligt medan man mäter. Mätningen kommer inte med på utskriften.
 
 ## Linjetyper och linjetjocklekar
 
@@ -78,7 +85,7 @@ Objekt på lager som är släckta eller frysta visas inte, precis som i AutoCAD.
 
 Statusraden visar om allt i ritningen kom med, t.ex. **Alla 312 objekt visas**. Om något inte går att visa står det i rött, t.ex. **2 av 153 objekt visas inte**. Håll muspekaren över texten för att se vilka objekttyper det gäller och varför, och hur många objekt av varje typ som ritades.
 
-Räkningen gäller modellrymden, block som används och inlästa xrefs. Objekt på släckta och frysta lager räknas inte, eftersom de inte ska synas. Finns det objekt i layouterna (pappersrymden) står det också där.
+Räkningen gäller modellrymden, block som används och inlästa xrefs. Objekt på släckta och frysta lager räknas inte, eftersom de inte ska synas, men listan visar vilka lager som är dolda och hur många objekt som ligger på dem. Saknas något jämfört med AutoCAD är det första stället att titta. Finns det objekt i layouterna (pappersrymden) står det också där.
 
 Det här ritas: linjer, bågar, cirklar, ellipser, polylinjer (även gamla POLYLINE och 3D-polylinjer), splines, XLINE och RAY, text och flerradig text, mått, hänvisningslinjer (LEADER och MULTILEADER), toleranser, tabeller, block och blockattribut, attributdefinitioner, skraffyr och fyllningar, SOLID, WIPEOUT, multilinjer (MLINE), 3D-ytor (3DFACE) och punkter.
 
@@ -86,7 +93,7 @@ Det här ritas: linjer, bågar, cirklar, ellipser, polylinjer (även gamla POLYL
 
 - Bara modellrymden visas, inte layouter/pappersrymd.
 - Blockattribut (t.ex. värdena i en ritningsstämpel) visas, utom de som är markerade som osynliga. Flerradiga attribut visas på en rad.
-- Linjetyper med text eller symboler (t.ex. ---GAS---) visas bara som streck, utan texten.
+- Linjetyper med symboler (SHX-former) visas bara som streck. Linjetyper med text (t.ex. ---H1---) visas med texten.
 - 3D-solider och andra 3D-kroppar, inbäddade bilder, OLE-objekt och underlägg (PDF/DWF/DGN) ritas inte. Statusraden talar om när en ritning innehåller sådant.
 - Tabeller i DWG 2013 och senare: tabellens placering går inte att läsa, så tabellen visas inte (statusraden talar om det).
 - Multilinjer (MLINE) ritas med heldragna linjer och utan fyllning.

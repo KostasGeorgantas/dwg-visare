@@ -122,12 +122,14 @@ viewport.addEventListener('wheel', (e) => {
   zoomAt(Math.exp(-delta * 0.0015), e.clientX - r.left, e.clientY - r.top);
 }, { passive: false });
 
+let pressStart = null;
 viewport.addEventListener('pointerdown', (e) => {
   if (!svg || (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1)) return;
   e.preventDefault();
   viewport.focus();
   viewport.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  pressStart = { x: e.clientX, y: e.clientY, button: e.button, moved: false };
   if (pointers.size === 2) pinchDist = distance();
   viewport.classList.add('panning');
 });
@@ -136,7 +138,9 @@ viewport.addEventListener('pointermove', (e) => {
   updateCoords(e);
   const r = viewport.getBoundingClientRect();
   cursor = { x: e.clientX - r.left, y: e.clientY - r.top };
-  if (showGuides && !pointers.size) drawGuides();
+  if (pressStart && Math.hypot(e.clientX - pressStart.x, e.clientY - pressStart.y) > 4) pressStart.moved = true;
+  if (measuring && !pointers.size) updateHoverSnap();
+  if ((showGuides || measuring) && !pointers.size) drawGuides();
   const prev = pointers.get(e.pointerId);
   if (!prev) return;
   if (pointers.size === 1) {
@@ -155,6 +159,14 @@ viewport.addEventListener('pointermove', (e) => {
 });
 
 function endPointer(e) {
+  // Ett klick (utan att dra) i mätläge sätter en mätpunkt
+  if (e.type === 'pointerup' && measuring && pressStart && !pressStart.moved && pressStart.button === 0 && pointers.size === 1) {
+    const r = viewport.getBoundingClientRect();
+    cursor = { x: e.clientX - r.left, y: e.clientY - r.top };
+    updateHoverSnap();
+    measureClick(hoverSnap || screenToWorld(cursor.x, cursor.y));
+  }
+  pressStart = null;
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinchDist = 0;
   if (pointers.size === 0) viewport.classList.remove('panning');
@@ -165,6 +177,7 @@ viewport.addEventListener('pointerleave', () => {
   $('st-x').textContent = '–';
   $('st-y').textContent = '–';
   cursor = null;
+  hoverSnap = null;
   drawGuides();
 });
 
@@ -192,6 +205,8 @@ function updateCoords(e) {
 
 viewport.addEventListener('keydown', (e) => {
   if (!svg) return;
+  if (e.key === 'm' || e.key === 'M') { e.preventDefault(); setMeasuring(!measuring); return; }
+  if (e.key === 'Escape' && measuring) { e.preventDefault(); escapeMeasure(); return; }
   const step = 60;
   const keys = {
     ArrowLeft: () => panBy(step, 0), ArrowRight: () => panBy(-step, 0),
@@ -238,6 +253,7 @@ async function readDrawing(name, data, filePath) {
     const xrefs = await attachXrefs(lib, db, filePath, 0, new Set([filePath.toLowerCase()]));
     const markup = lib.dwg_to_svg(db).replace(/^<\?xml[^>]*>\s*/, '');
     const content = lib.lastSvgStats;
+    const snapPoints = lib.lastSnapPoints || [];
 
     const tab = createTab(name, bytes.byteLength, markup);
     if (!tab) throw new Error(`${name} verkar vara tom. Det finns inga objekt i modellrymden att visa.`);
@@ -245,6 +261,9 @@ async function readDrawing(name, data, filePath) {
     tab.fonts = await applyFonts(tab.svg, db.tables?.STYLE?.entries || [], filePath);
     tab.xrefs = xrefs;
     tab.content = content;
+    tab.snap = buildSnapIndex(snapPoints);
+    tab.units = UNIT_NAMES[Number(db.header?.INSUNITS)] || '';
+    tab.measure = { a: null, b: null };
     tabs.push(tab);
     renderTabs();
     activate(tab);
@@ -553,7 +572,14 @@ function showContentStatus(content) {
   }
   lines.push('Ritade objekt per typ:');
   for (const [type, c] of rows.filter(([, c]) => c.drawn).sort((a, b) => b[1].drawn - a[1].drawn)) lines.push(`   ${type}: ${fmt(c.drawn)}`);
-  lines.push('', 'Räknar objekt i modellrymden, i block som används och i inlästa xrefs. Objekt på släckta och frysta lager räknas inte.');
+  const hidden = Object.entries(content.hidden || {}).sort((a, b) => b[1] - a[1]);
+  if (hidden.length) {
+    const n = hidden.reduce((sum, [, c]) => sum + c, 0);
+    lines.push('', `Dolda eftersom lagret är släckt eller fryst: ${fmt(n)} objekt på ${hidden.length} lager`);
+    for (const [layer, c] of hidden.slice(0, 15)) lines.push(`   ${layer}: ${fmt(c)}`);
+    if (hidden.length > 15) lines.push(`   … och ${hidden.length - 15} lager till`);
+  }
+  lines.push('', 'Räknar objekt i modellrymden, i block som används och i inlästa xrefs.');
   if (content.paperSpace) {
     lines.push('', `Layouterna (pappersrymden) innehåller ${fmt(content.paperSpace)} objekt som inte visas, t.ex. ritningsramar som bara finns där.`);
   }
@@ -601,6 +627,8 @@ function activate(tab) {
   showFontStatus(tab ? tab.fonts : null);
   showXrefStatus(tab ? tab.xrefs : null);
   showContentStatus(tab ? tab.content : null);
+  hoverSnap = null;
+  showMeasureStatus();
   if (!tab) { $('st-zoom').textContent = '–'; $('st-grid').textContent = ''; }
   api.setTitle(tab ? `${tab.name} – DWG-visare` : 'DWG-visare');
   renderTabs();
@@ -681,8 +709,13 @@ function drawGuides() {
   const ctx = guides.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  if (!showGuides || !svg) { $('st-grid').textContent = ''; return; }
+  if (!svg) { $('st-grid').textContent = ''; return; }
+  if (showGuides) drawGrid(ctx, w, h);
+  else $('st-grid').textContent = '';
+  if (measuring || active?.measure?.a) drawMeasure(ctx, w, h);
+}
 
+function drawGrid(ctx, w, h) {
   const css = getComputedStyle(document.body);
   const left = view.cx - (w / 2) * view.upp;
   const top = view.cy - (h / 2) * view.upp;
@@ -730,6 +763,163 @@ function drawGuides() {
   $('st-grid').innerHTML = `Rutnät <b>${step.toLocaleString('sv-SE', { maximumFractionDigits: 6 })}</b>`;
 }
 
+// ---------- Mätning ----------
+// Klicka på två punkter för att mäta avståndet. Musen fäster mot punkter i ritningen
+// (ändpunkter, mittpunkter, hörn, centrum, insättningspunkter) som konverteraren samlar in.
+
+const UNIT_NAMES = { 1: 'tum', 2: 'fot', 4: 'mm', 5: 'cm', 6: 'm', 7: 'km', 14: 'dm' };
+const SNAP_RADIUS_PX = 12;
+let measuring = false;
+let hoverSnap = null;
+
+// Rutnät över fästpunkterna så att närmaste punkt hittas snabbt
+function buildSnapIndex(points) {
+  if (!points.length) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+  }
+  const cell = Math.max(maxX - minX, maxY - minY, 1e-9) / Math.max(16, Math.sqrt(points.length) * 2);
+  const cells = new Map();
+  for (const p of points) {
+    const key = `${Math.floor(p.x / cell)},${Math.floor(p.y / cell)}`;
+    let list = cells.get(key);
+    if (!list) cells.set(key, list = []);
+    list.push(p);
+  }
+  return { cell, cells };
+}
+
+function nearestSnap(index, x, y, radius) {
+  if (!index) return null;
+  const r = Math.ceil(radius / index.cell);
+  if ((2 * r + 1) ** 2 > 4000) return null; // för utzoomat för att fästa meningsfullt
+  const cx = Math.floor(x / index.cell), cy = Math.floor(y / index.cell);
+  let best = null, bestD = radius;
+  for (let i = cx - r; i <= cx + r; i++) {
+    for (let j = cy - r; j <= cy + r; j++) {
+      for (const p of index.cells.get(`${i},${j}`) || []) {
+        const d = Math.hypot(p.x - x, p.y - y);
+        if (d <= bestD) { bestD = d; best = p; }
+      }
+    }
+  }
+  return best;
+}
+
+// Skärmpunkt till ritningens koordinater (y uppåt) och tillbaka
+function screenToWorld(sx, sy) {
+  const { w, h } = size();
+  return { x: view.cx + (sx - w / 2) * view.upp, y: -(view.cy + (sy - h / 2) * view.upp) };
+}
+function worldToScreen(p) {
+  const { w, h } = size();
+  return { x: (p.x - view.cx) / view.upp + w / 2, y: (-p.y - view.cy) / view.upp + h / 2 };
+}
+
+function updateHoverSnap() {
+  if (!measuring || !cursor || !active) { hoverSnap = null; return; }
+  const p = screenToWorld(cursor.x, cursor.y);
+  hoverSnap = nearestSnap(active.snap, p.x, p.y, SNAP_RADIUS_PX * view.upp);
+  if (active.measure.a && !active.measure.b) showMeasureStatus();
+}
+
+function measureClick(p) {
+  const m = active.measure;
+  if (!m.a || m.b) { m.a = { x: p.x, y: p.y }; m.b = null; }
+  else m.b = { x: p.x, y: p.y };
+  showMeasureStatus();
+  drawGuides();
+}
+
+function escapeMeasure() {
+  const m = active?.measure;
+  if (m && m.a) { m.a = null; m.b = null; showMeasureStatus(); drawGuides(); }
+  else setMeasuring(false);
+}
+
+function setMeasuring(on) {
+  measuring = on && !!svg;
+  $('btn-measure').setAttribute('aria-pressed', measuring);
+  viewport.classList.toggle('measuring', measuring);
+  if (!measuring) hoverSnap = null;
+  else updateHoverSnap();
+  showMeasureStatus();
+  drawGuides();
+}
+
+function measureEnd() {
+  const m = active?.measure;
+  if (!m?.a) return null;
+  if (m.b) return m.b;
+  if (!measuring || !cursor) return null;
+  return hoverSnap || screenToWorld(cursor.x, cursor.y);
+}
+
+function formatLength(v) {
+  const abs = Math.abs(v);
+  const digits = abs >= 100 ? 0 : abs >= 1 ? 2 : 4;
+  return v.toLocaleString('sv-SE', { maximumFractionDigits: digits });
+}
+
+function measureValues() {
+  const a = active?.measure?.a, b = measureEnd();
+  if (!a || !b) return null;
+  const dx = b.x - a.x, dy = b.y - a.y;
+  let ang = Math.atan2(dy, dx) * 180 / Math.PI;
+  if (ang < 0) ang += 360;
+  return { a, b, dx, dy, dist: Math.hypot(dx, dy), ang };
+}
+
+function showMeasureStatus() {
+  const el = $('st-measure');
+  const v = measureValues();
+  if (!v) {
+    el.textContent = measuring ? (active?.measure?.a ? 'Klicka på andra punkten' : 'Mät: klicka på första punkten (Esc avslutar)') : '';
+    return;
+  }
+  const u = active.units ? ` ${active.units}` : '';
+  el.innerHTML = `Avstånd <b>${formatLength(v.dist)}${u}</b> · ΔX ${formatLength(v.dx)} · ΔY ${formatLength(v.dy)} · ${v.ang.toLocaleString('sv-SE', { maximumFractionDigits: 1 })}°`;
+}
+
+function drawMeasure(ctx) {
+  const css = getComputedStyle(document.body);
+  const color = css.getPropertyValue('--accent').trim() || '#4f9fd8';
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  // Fästmarkör: en ruta runt punkten musen fäster mot
+  if (measuring && hoverSnap) {
+    const s = worldToScreen(hoverSnap);
+    ctx.strokeRect(Math.round(s.x) - 5.5, Math.round(s.y) - 5.5, 11, 11);
+  }
+  const v = measureValues();
+  const a = active?.measure?.a;
+  if (a) {
+    const sa = worldToScreen(a);
+    ctx.beginPath(); ctx.arc(sa.x, sa.y, 3, 0, Math.PI * 2); ctx.fill();
+  }
+  if (v) {
+    const sa = worldToScreen(v.a), sb = worldToScreen(v.b);
+    ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
+    ctx.beginPath(); ctx.arc(sb.x, sb.y, 3, 0, Math.PI * 2); ctx.fill();
+    // Etikett med avståndet vid linjens mitt
+    const label = `${formatLength(v.dist)}${active.units ? ' ' + active.units : ''}`;
+    ctx.font = '600 12px ' + (css.getPropertyValue('--ui') || 'sans-serif');
+    const tw = ctx.measureText(label).width;
+    const mx = (sa.x + sb.x) / 2, my = (sa.y + sb.y) / 2 - 14;
+    ctx.fillStyle = css.getPropertyValue('--chrome').trim() || '#222';
+    ctx.fillRect(mx - tw / 2 - 6, my - 10, tw + 12, 20);
+    ctx.strokeRect(mx - tw / 2 - 6 + 0.5, my - 10 + 0.5, tw + 11, 19);
+    ctx.fillStyle = css.getPropertyValue('--text').trim() || '#fff';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, mx, my);
+  }
+  ctx.restore();
+}
+
 function setGuides(on) {
   showGuides = on;
   $('btn-guides').setAttribute('aria-pressed', on);
@@ -759,7 +949,8 @@ function themeColors(root) {
 
 function setLoaded(on) {
   $('empty').hidden = on;
-  for (const id of ['btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-print', 'btn-guides', 'btn-lw']) $(id).disabled = !on;
+  for (const id of ['btn-zoom-in', 'btn-zoom-out', 'btn-fit', 'btn-print', 'btn-guides', 'btn-lw', 'btn-measure']) $(id).disabled = !on;
+  if (!on && measuring) setMeasuring(false);
 }
 
 // Bara för test i vanlig webbläsare: xref-filer hämtas från mappen samples/
@@ -860,6 +1051,7 @@ $('btn-fit').onclick = fit;
 $('btn-bg').onclick = () => setLight(!document.body.classList.contains('light'));
 $('btn-print').onclick = print;
 $('btn-guides').onclick = () => setGuides(!showGuides);
+$('btn-measure').onclick = () => { setMeasuring(!measuring); viewport.focus(); };
 $('print-mono').onchange = () => setMono(true);
 $('print-color').onchange = () => setMono(false);
 $('btn-lw').onclick = () => setLineweights($('btn-lw').getAttribute('aria-pressed') !== 'true');
@@ -871,6 +1063,7 @@ api.on('zoom-out', () => zoomAt(1 / 1.5));
 api.on('zoom-fit', fit);
 api.on('toggle-bg', () => setLight(!document.body.classList.contains('light')));
 api.on('toggle-guides', () => setGuides(!showGuides));
+api.on('toggle-measure', () => setMeasuring(!measuring));
 api.on('toggle-lineweights', () => setLineweights($('btn-lw').getAttribute('aria-pressed') !== 'true'));
 api.on('close-tab', () => closeTab(active));
 api.on('next-tab', () => cycleTab(1));

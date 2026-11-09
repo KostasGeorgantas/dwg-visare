@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   pathForFile: (file) => { try { return webUtils.getPathForFile(file); } catch { return ''; } },
   on: (channel, fn) => {
     const allowed = ['file-opened', 'before-print', 'after-print', 'zoom-in', 'zoom-out', 'zoom-fit', 'toggle-bg',
-      'toggle-guides', 'toggle-lineweights', 'close-tab', 'next-tab', 'prev-tab'];
+      'toggle-guides', 'toggle-measure', 'toggle-lineweights', 'close-tab', 'next-tab', 'prev-tab'];
     if (allowed.includes(channel)) ipcRenderer.on(channel, (_e, payload) => fn(payload));
   }
 });

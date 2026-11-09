@@ -5806,7 +5806,8 @@ class SvgConverter {
     if (block) {
       return {
         bbox: block.bbox,
-        element: `<use href="#${this.blockId(entity.name)}" />`
+        element: `<use href="#${this.blockId(entity.name)}" />`,
+        snaps: this.snapByBlock?.get(entity.name) || []
       };
     }
     return null;
@@ -5857,9 +5858,18 @@ class SvgConverter {
     }
     const bbox = new Box2D();
     const uses = [];
+    // Blockets fästpunkter (utom de utanför en klippgräns) förs över till referensens koordinater
+    let childSnaps = this.snapByBlock?.get(entity.name) || [];
+    if (clip) childSnaps = childSnaps.filter((p) => pointInPolygon(p, clip));
+    const snaps = [{ x: ins.x, y: ins.y }];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const ox = c * cs, oy = r * rs;
+        for (const p of childSnaps) {
+          if (snaps.length >= SNAP_LIMIT) break;
+          const lx = (p.x - base.x) * sx + ox, ly = (p.y - base.y) * sy + oy;
+          snaps.push({ x: ins.x + lx * cos - ly * sin, y: ins.y + lx * sin + ly * cos });
+        }
         uses.push(`<use href="#${this.blockId(entity.name)}"${clipAttr} transform="translate(${ins.x},${ins.y}) rotate(${rot * 180 / Math.PI}) translate(${ox},${oy}) scale(${sx},${sy}) translate(${-base.x},${-base.y})" />`);
         // Utbredningen räknas från klippgränsen om referensen är klippt, annars från blocket
         let corners = [];
@@ -5874,7 +5884,7 @@ class SvgConverter {
         }
       }
     }
-    return { bbox, element: uses.join("") };
+    return { bbox, element: uses.join(""), snaps };
   }
   // DWG-visare: linjetjocklek och linjetyp som inline-stil, så att de även gäller i block.
   // Tom sträng betyder att värdet ärvs från blockreferensen (ByBlock, eller lager 0 i ett block).
@@ -6062,6 +6072,109 @@ class SvgConverter {
     }
     return parts.length ? parts.join("") : null;
   }
+  // DWG-visare: fästpunkter för mätverktyget (ändpunkter, mittpunkter, hörn, centrum)
+  entitySnaps(entity) {
+    const pts = [];
+    const add = (p) => { if (p && isFinite(p.x) && isFinite(p.y)) pts.push({ x: p.x, y: p.y }); };
+    const mid = (a, b) => a && b && add({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    switch (entity.type) {
+      case "LINE": add(entity.startPoint); add(entity.endPoint); mid(entity.startPoint, entity.endPoint); break;
+      case "LWPOLYLINE": case "POLYLINE2D": case "POLYLINE3D": {
+        const vs = entity.vertices || [];
+        vs.forEach((v, i) => { add(v); if (i > 0 && !vs[i - 1].bulge) mid(vs[i - 1], v); });
+        break;
+      }
+      case "ARC": case "CIRCLE": {
+        const c = entity.center, r = entity.radius;
+        add(c);
+        if (entity.type === "CIRCLE") for (let i = 0; i < 4; i++) add({ x: c.x + r * Math.cos(i * Math.PI / 2), y: c.y + r * Math.sin(i * Math.PI / 2) });
+        else for (const a of [entity.startAngle, entity.endAngle]) add({ x: c.x + r * Math.cos(a), y: c.y + r * Math.sin(a) });
+        break;
+      }
+      case "ELLIPSE": add(entity.center); break;
+      case "POINT": add(entity.position); break;
+      case "SOLID": case "3DFACE": [entity.corner1, entity.corner2, entity.corner3, entity.corner4].forEach(add); break;
+      case "TEXT": add(entity.startPoint); break;
+      case "MTEXT": add(entity.insertionPoint); break;
+      case "SPLINE": (entity.fitPoints?.length ? entity.fitPoints : entity.controlPoints || []).forEach(add); break;
+      case "LEADER": (entity.vertices || []).forEach(add); break;
+      case "MLINE": (entity.vertices || []).forEach((v) => add(v.vertex)); break;
+    }
+    return pts;
+  }
+  // DWG-visare: linjens förlopp som polylinjer, för text i linjetyper
+  entityPaths(entity) {
+    switch (entity.type) {
+      case "LINE": return [[entity.startPoint, entity.endPoint]];
+      case "LWPOLYLINE": return [interpolatePolyline(entity, !!(entity.flag & 512))];
+      case "POLYLINE2D": {
+        const vertices = (entity.vertices || []).filter((v) => !(v.flag & 16));
+        return vertices.length > 1 ? [interpolatePolyline({ vertices }, !!(entity.flag & 1))] : [];
+      }
+      case "ARC": case "CIRCLE": {
+        const c = entity.center, r = entity.radius;
+        let a0 = entity.type === "ARC" ? entity.startAngle : 0, a1 = entity.type === "ARC" ? entity.endAngle : Math.PI * 2;
+        while (a1 <= a0) a1 += Math.PI * 2;
+        const n = Math.max(16, Math.ceil((a1 - a0) / (Math.PI / 90)));
+        return [Array.from({ length: n + 1 }, (_, i) => ({ x: c.x + r * Math.cos(a0 + (a1 - a0) * i / n), y: c.y + r * Math.sin(a0 + (a1 - a0) * i / n) }))];
+      }
+      default: return [];
+    }
+  }
+  // DWG-visare: linjetyper med text (t.ex. ---H1---). Texten placeras där mönstret anger,
+  // räknat från linjens början, och vrids längs linjen.
+  linetypeText(entity, inBlock, color) {
+    const layer = this.layerMap.get(String(entity.layer).toLowerCase());
+    let lt = String(entity.lineType || "ByLayer");
+    if (lt.toLowerCase() === "bylayer") {
+      if (inBlock && String(entity.layer) === "0") return "";
+      lt = layer?.lineType || "Continuous";
+    }
+    const ltype = this.ltypeMap.get(lt.toLowerCase());
+    const pattern = ltype?.pattern || [];
+    if (!pattern.some((p) => p.elementTypeFlag & 2 && p.text)) return "";
+    const scale = (entity.lineTypeScale > 0 ? entity.lineTypeScale : 1) * this.ltScale;
+    // Mönstret börjar alltid med ett streck i SVG (se dashFromLengths), så samma förskjutning här
+    const lengths = pattern.map((p) => Math.abs(Number(p.elementLength) || 0) * scale);
+    const period = lengths.reduce((a, b) => a + b, 0);
+    if (!(period > 0)) return "";
+    const items = [];
+    // Texten hör till elementet före den i definitionen och placeras i slutet av det
+    // (t.ex. A,.5,-.2,["GAS",STANDARD,S=.1,X=-.1,Y=-.05],-.25: texten står i mellanrummet)
+    let at = 0;
+    pattern.forEach((p, i) => {
+      at += lengths[i];
+      if (p.elementTypeFlag & 2 && p.text) {
+        items.push({ at, text: String(p.text), h: (Number(p.scale) || 0) * scale, dx: (Number(p.offsetX) || 0) * scale, dy: (Number(p.offsetY) || 0) * scale, rot: Number(p.rotation) || 0, abs: !!(p.elementTypeFlag & 1) });
+      }
+    });
+    const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    let out = "", count = 0;
+    for (const path of this.entityPaths(entity)) {
+      // Längd längs linjen för varje hörn
+      const acc = [0];
+      for (let i = 1; i < path.length; i++) acc.push(acc[i - 1] + Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y));
+      const total = acc[acc.length - 1];
+      if (!(total > 0)) continue;
+      let seg = 0;
+      for (let start = 0; start < total && count < 3000; start += period) {
+        for (const it of items) {
+          const d = start + it.at + it.dx;
+          if (d < 0 || d > total || !(it.h > 0)) continue;
+          while (seg < acc.length - 2 && acc[seg + 1] < d) seg++;
+          while (seg > 0 && acc[seg] > d) seg--;
+          const a = path[seg], b = path[seg + 1], len = acc[seg + 1] - acc[seg] || 1;
+          const t = (d - acc[seg]) / len;
+          const ang = Math.atan2(b.y - a.y, b.x - a.x);
+          const x = a.x + (b.x - a.x) * t - Math.sin(ang) * it.dy, y = a.y + (b.y - a.y) * t + Math.cos(ang) * it.dy;
+          const deg = (it.abs ? it.rot : ang + it.rot) * 180 / Math.PI;
+          out += `<text x="0" y="0" font-size="${it.h}" fill="${color}" stroke="none" transform="translate(${x},${y}) rotate(${deg}) scale(1,-1)">${esc(it.text)}</text>`;
+          count++;
+        }
+      }
+    }
+    return out ? `<g data-style="STANDARD">${out}</g>` : "";
+  }
   // DWG-visare: fler objekttyper
   pathOf(points, closed = false) {
     return "M" + points.map((p) => `${p.x},${p.y}`).join("L") + (closed ? "Z" : "");
@@ -6247,6 +6360,12 @@ class SvgConverter {
     byType[type] = byType[type] || { drawn: 0, skipped: 0, failed: 0 };
     byType[type][outcome]++;
   }
+  countHidden(blockName, layer) {
+    if (!this.hiddenStats) this.hiddenStats = /* @__PURE__ */ new Map();
+    if (!this.hiddenStats.has(blockName)) this.hiddenStats.set(blockName, {});
+    const byLayer = this.hiddenStats.get(blockName);
+    byLayer[layer] = (byLayer[layer] || 0) + 1;
+  }
   useBlock(name) {
     if (!this.blockUses) this.blockUses = /* @__PURE__ */ new Map();
     const from = this.currentBlock || "";
@@ -6263,7 +6382,9 @@ class SvgConverter {
       reached.add(name);
       for (const next of this.blockUses?.get(name) || []) queue.push(next);
     }
+    const hidden = {};
     for (const name of reached) {
+      for (const [layer, n] of Object.entries(this.hiddenStats?.get(name) || {})) hidden[layer] = (hidden[layer] || 0) + n;
       for (const [type, c] of Object.entries(this.stats?.get(name) || {})) {
         const t = types[type] = types[type] || { drawn: 0, skipped: 0, failed: 0 };
         t.drawn += c.drawn; t.skipped += c.skipped; t.failed += c.failed;
@@ -6273,7 +6394,7 @@ class SvgConverter {
     for (const b of this.dwg?.tables?.BLOCK_RECORD?.entries || []) {
       if (/^\*paper_space/i.test(b.name)) paperSpace += (b.entities || []).filter((e) => e.type !== "VIEWPORT").length;
     }
-    return { types, paperSpace };
+    return { types, paperSpace, hidden };
   }
   block(block, dwg) {
     if (!block) return null;
@@ -6289,9 +6410,14 @@ class SvgConverter {
   }
   blockInner(block, dwg, inBlock) {
     const entities = block.entities || [];
+    // Fästpunkter för mätverktyget, i blockets egna koordinater
+    const snaps = [];
     const { bbox, elements } = entities.reduce(
       (acc, entity) => {
-        if (this.hiddenLayers && this.hiddenLayers.has(String(entity.layer).toLowerCase())) return acc;
+        if (this.hiddenLayers && this.hiddenLayers.has(String(entity.layer).toLowerCase())) {
+          this.countHidden(block.name, String(entity.layer));
+          return acc;
+        }
         if (entity.isVisible === false) return acc;
         // ATTDEF inuti block visas aldrig (värdet visas som attribut på blockreferensen) och
         // VIEWPORT hör till layouterna, så de räknas inte som saknade
@@ -6301,6 +6427,19 @@ class SvgConverter {
         // DWG-visare: hoppa över enskilda objekt som inte går att rita i stället för att hela ritningen misslyckas
         try { boundsAndElement = this.entityToBoundsAndElement(entity); } catch (err) { failed = true; console.warn("Hoppar över", entity.type, err); }
         if (counted) this.count(block.name, entity.type, boundsAndElement ? "drawn" : failed ? "failed" : "skipped");
+        let entitySnaps = [];
+        if (boundsAndElement) {
+          // Text i linjetyper (t.ex. ---H1---) och fästpunkter, i objektets koordinater
+          try {
+            const color = this.getEntityColor(dwg.tables.LAYER.entries, entity).cssColor;
+            boundsAndElement.element += this.linetypeText(entity, inBlock, color);
+          } catch (err) { console.warn("Linjetypens text kunde inte ritas", err); }
+          try { entitySnaps = boundsAndElement.snaps || this.entitySnaps(entity); } catch { entitySnaps = []; }
+          if (OCS_TYPES.has(entity.type) && entity.extrusionDirection && entity.extrusionDirection.z < -0.999) {
+            entitySnaps = entitySnaps.map((p) => ({ x: -p.x, y: p.y }));
+          }
+          if (snaps.length < SNAP_LIMIT) for (const p of entitySnaps) if (p && isFinite(p.x) && isFinite(p.y)) snaps.push(p);
+        }
         // DWG-visare: objekt i ett objektkoordinatsystem med Z-axeln nedåt (t.ex. efter
         // spegling) har spegelvänd X. Funktionen fanns men anropades aldrig.
         if (boundsAndElement && OCS_TYPES.has(entity.type)) boundsAndElement = this.addFlipXIfApplicable(entity, boundsAndElement);
@@ -6356,6 +6495,8 @@ class SvgConverter {
         elements: []
       }
     );
+    if (!this.snapByBlock) this.snapByBlock = /* @__PURE__ */ new Map();
+    this.snapByBlock.set(block.name, snaps);
     if (bbox.valid) {
       return {
         bbox,
@@ -6727,8 +6868,9 @@ const _LibreDwg = class _LibreDwg {
   dwg_to_svg(data) {
     const converter = new SvgConverter();
     const svg = converter.convert(data);
-    // DWG-visare: vad som ritades och vad som inte gick att visa
+    // DWG-visare: vad som ritades och vad som inte gick att visa, och fästpunkter för mätning
     this.lastSvgStats = converter.summary();
+    this.lastSnapPoints = converter.snapByBlock?.get(converter.modelSpaceName) || [];
     return svg;
   }
   /**
@@ -7849,6 +7991,16 @@ __publicField(_LibreDwg, "instance");
 let LibreDwg = _LibreDwg;
 // DWG-visare: objekttyper vars koordinater ligger i ett objektkoordinatsystem (OCS)
 const OCS_TYPES = /* @__PURE__ */ new Set(["ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE2D", "TEXT", "INSERT", "HATCH", "SOLID", "ATTDEF"]);
+// DWG-visare: högsta antal fästpunkter per block (för mätverktyget)
+const SNAP_LIMIT = 300000;
+function pointInPolygon(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
 // DWG-visare: objekttyper som fylls med sin färg
 const FILL_TYPES = /* @__PURE__ */ new Set(["TEXT", "MTEXT", "HATCH", "SOLID", "ATTDEF", "TOLERANCE", "LEADER", "MULTILEADER", "ACAD_TABLE", "TABLE"]);
 // DWG-visare: textstilens namn som säkert attributvärde

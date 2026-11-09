@@ -209,6 +209,9 @@ body {
 .st-coord b { display: inline-block; min-width: 11ch; text-align: right; }
 .st-zoom b { display: inline-block; min-width: 6ch; text-align: right; }
 .st-warn { color: var(--danger); }
+.st-measure { color: var(--text); white-space: nowrap; }
+.st-measure b { color: var(--accent); }
+.viewport.measuring { cursor: crosshair; }
 .st-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 
 /* ---------- Utskrift: bara ritningen, vitt papper ---------- */
